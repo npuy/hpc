@@ -23,10 +23,30 @@
 void compute_forces_direct(Particle *p, int n, double softening);
 
 /*
+ * Variante paralelizable con OpenMP del método directo. NO usa la tercera ley
+ * de Newton: cada partícula i acumula sobre una copia local recorriendo todos
+ * los j != i, y escribe solo en p[i].acc. Cuesta el doble de flops que
+ * compute_forces_direct pero no tiene carreras de datos y es bit a bit
+ * reproducible con cualquier número de hilos.
+ *
+ * compute_forces_direct escribe en p[j].acc dentro del bucle interno y por eso
+ * NO puede paralelizarse sobre i; se conserva como oráculo secuencial exacto.
+ * Los resultados de ambas difieren solo en el orden de las sumas.
+ */
+void compute_forces_direct_par(Particle *p, int n, double softening);
+
+/*
  * Energía cinética total del sistema: K = Σᵢ ½ mᵢ |vᵢ|².
  * Necesaria junto con potential_energy para monitorear conservación de energía.
  */
 double kinetic_energy(const Particle *p, int n);
+
+/*
+ * Contribución de las partículas [i0, i1) a la energía cinética total.
+ * Sumando el resultado de todos los procesos MPI (Allreduce) se obtiene la
+ * energía cinética global. kinetic_energy es el caso particular (0, n).
+ */
+double kinetic_energy_range(const Particle *p, int n, int i0, int i1);
 
 /*
  * Energía potencial gravitatoria total: U = -Σᵢ<ⱼ mᵢmⱼ / √(|rᵢⱼ|² + ε²).

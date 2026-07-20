@@ -52,16 +52,33 @@ static void accumulate_force(const Octree *t, int idx, int i, const Particle *p,
     }
 }
 
-void compute_forces_bh(const Octree *t, Particle *p, int n,
-                       double theta, double softening) {
+/*
+ * schedule(dynamic, 64): el costo por particula no es uniforme — una particula
+ * en una region densa abre muchos mas nodos que una en la periferia. Con static
+ * los hilos que tocan zonas vacias terminan primero y quedan ociosos. El chunk
+ * de 64 amortiza el costo de sincronizacion del scheduler.
+ *
+ * Cada iteracion escribe solo p[i].acc y el orden de las sumas dentro de una
+ * particula no depende del numero de hilos, por lo que el resultado es bit a bit
+ * identico al secuencial para cualquier T (lo verifica el test 9).
+ */
+void compute_forces_bh_range(const Octree *t, Particle *p, int n,
+                             int i0, int i1, double theta, double softening) {
+    (void)n;
     double eps2 = softening * softening;
     double theta2 = theta * theta;
 
-    for (int i = 0; i < n; i++) {
+    #pragma omp parallel for schedule(dynamic, 64)
+    for (int i = i0; i < i1; i++) {
         double acc[3] = {0, 0, 0};
         accumulate_force(t, t->root, i, p, theta2, eps2, acc);
         VEC3_COPY(p[i].acc, acc);
     }
+}
+
+void compute_forces_bh(const Octree *t, Particle *p, int n,
+                       double theta, double softening) {
+    compute_forces_bh_range(t, p, n, 0, n, theta, softening);
 }
 
 /* Potencial en la partícula i por recorrido del subárbol idx. */
@@ -99,12 +116,22 @@ static double potential_at(const Octree *t, int idx, int i, const Particle *p,
     return phi;
 }
 
-double potential_energy_bh(const Octree *t, const Particle *p, int n,
-                           double theta, double softening) {
+double potential_energy_bh_range(const Octree *t, const Particle *p, int n,
+                                 int i0, int i1, double theta, double softening) {
+    (void)n;
     double eps2 = softening * softening;
     double theta2 = theta * theta;
     double U = 0.0;
-    for (int i = 0; i < n; i++)
+    /* La reduccion cambia el orden de las sumas segun el numero de hilos, asi
+       que esta funcion NO es bit a bit reproducible (a diferencia de las
+       fuerzas). La diferencia es del orden del epsilon de maquina. */
+    #pragma omp parallel for schedule(dynamic, 64) reduction(+:U)
+    for (int i = i0; i < i1; i++)
         U += 0.5 * p[i].mass * potential_at(t, t->root, i, p, theta2, eps2);
     return U;
+}
+
+double potential_energy_bh(const Octree *t, const Particle *p, int n,
+                           double theta, double softening) {
+    return potential_energy_bh_range(t, p, n, 0, n, theta, softening);
 }

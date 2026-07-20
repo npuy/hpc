@@ -4,10 +4,15 @@
 /*
  * particle.h — Estructura de datos central y funciones de inicialización/E/S.
  *
- * Define el tipo Particle (80 bytes) y provee generadores de condiciones
+ * Define el tipo Particle (96 bytes) y provee generadores de condiciones
  * iniciales para distintos escenarios: sistema de 2 cuerpos (validación),
  * esfera de Plummer (simulación astrofísica realista) y cubo uniforme
  * (benchmark simple). Incluye lectura/escritura en CSV para snapshots.
+ *
+ * El campo id es la identidad global estable de la partícula: sobrevive al
+ * reordenamiento por Morton y a la migración entre procesos MPI, y es lo que
+ * permite verificar que ninguna partícula se pierde ni se duplica (tests 11 y
+ * 13). Los generadores lo asignan como el índice inicial 0..n-1.
  */
 
 #include <stdint.h>
@@ -18,6 +23,7 @@ typedef struct {
     double acc[3];    /* aceleración gravitatoria acumulada (ax, ay, az) */
     double mass;      /* masa de la partícula (masa total del sistema = 1) */
     uint64_t morton;  /* clave Morton de 63 bits para ordenamiento Z-order */
+    int64_t  id;      /* identidad global estable, asignada en la inicialización */
 } Particle;
 
 /*
@@ -44,7 +50,7 @@ void init_uniform_cube(Particle *p, int n, unsigned seed);
 
 /*
  * Serializa el estado de n partículas al archivo fname en CSV con header
- * "t,mass,x,y,z,vx,vy,vz" y precisión de 12 dígitos significativos.
+ * "t,id,mass,x,y,z,vx,vy,vz" y precisión de 12 dígitos significativos.
  * El parámetro t marca el instante temporal del snapshot.
  */
 void write_particles_csv(const char *fname, const Particle *p, int n, double t);

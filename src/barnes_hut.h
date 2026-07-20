@@ -26,6 +26,19 @@ void compute_forces_bh(const Octree *t, Particle *p, int n,
                        double theta, double softening);
 
 /*
+ * Igual que compute_forces_bh pero calcula solo las partículas del rango
+ * [i0, i1). El árbol se recorre completo (las n partículas ejercen fuerza),
+ * pero solo se escribe acc[] en ese subconjunto.
+ *
+ * Es el punto donde se compone el paralelismo híbrido: MPI reparte [i0,i1)
+ * entre procesos (cada rango calcula solo sus partículas sobre el árbol
+ * replicado) y OpenMP reparte ese rango entre los hilos del proceso.
+ * compute_forces_bh es el caso particular (0, n).
+ */
+void compute_forces_bh_range(const Octree *t, Particle *p, int n,
+                             int i0, int i1, double theta, double softening);
+
+/*
  * Energía potencial gravitatoria total aproximada por Barnes-Hut:
  * U = ½ Σᵢ mᵢ φᵢ, con φᵢ el potencial en la partícula i evaluado por el mismo
  * recorrido del árbol. Permite monitorear conservación de energía en O(N log N)
@@ -33,5 +46,15 @@ void compute_forces_bh(const Octree *t, Particle *p, int n,
  */
 double potential_energy_bh(const Octree *t, const Particle *p, int n,
                            double theta, double softening);
+
+/*
+ * Contribución de las partículas [i0, i1) a la energía potencial total.
+ * Sumando el resultado de todos los procesos MPI (Allreduce) se obtiene la
+ * energía potencial global. A diferencia de las fuerzas, el orden de la
+ * reducción depende del número de hilos, así que el resultado varía en el
+ * último bit; no usarla para comparaciones bit a bit.
+ */
+double potential_energy_bh_range(const Octree *t, const Particle *p, int n,
+                                 int i0, int i1, double theta, double softening);
 
 #endif

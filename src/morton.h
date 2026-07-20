@@ -32,4 +32,13 @@ uint64_t morton_encode(double x, double y, double z,
  */
 void morton_sort(Particle *p, int n, double min[3], double max[3]);
 
+/*
+ * Recalcula el campo morton de las n partículas sin reordenar el arreglo.
+ * La migración MPI lo necesita por separado: primero se recodifican las claves
+ * con el bounding box global (las partículas se movieron en el drift), se
+ * decide el proceso destino de cada una, y recién después del intercambio se
+ * reordena. Reordenar antes sería trabajo perdido.
+ */
+void morton_keys(Particle *p, int n, double min[3], double max[3]);
+
 #endif

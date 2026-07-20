@@ -19,10 +19,12 @@ void init_two_body(Particle *p, int *n) {
     p[0].mass = m;
     p[0].pos[0] = -r;
     p[0].vel[1] = -v;
+    p[0].id = 0;
 
     p[1].mass = m;
     p[1].pos[0] = r;
     p[1].vel[1] = v;
+    p[1].id = 1;
 }
 
 void init_plummer(Particle *p, int n, unsigned seed) {
@@ -33,6 +35,7 @@ void init_plummer(Particle *p, int n, unsigned seed) {
     for (int i = 0; i < n; i++) {
         memset(&p[i], 0, sizeof(Particle));
         p[i].mass = mass_each;
+        p[i].id = i;
 
         /* Plummer model: radius from inverse CDF */
         double X1 = ((double)rand() / RAND_MAX);
@@ -91,6 +94,7 @@ void init_uniform_cube(Particle *p, int n, unsigned seed) {
     for (int i = 0; i < n; i++) {
         memset(&p[i], 0, sizeof(Particle));
         p[i].mass = mass_each;
+        p[i].id = i;
         p[i].pos[0] = (double)rand() / RAND_MAX - 0.5;
         p[i].pos[1] = (double)rand() / RAND_MAX - 0.5;
         p[i].pos[2] = (double)rand() / RAND_MAX - 0.5;
@@ -103,10 +107,10 @@ void write_particles_csv(const char *fname, const Particle *p, int n, double t) 
         fprintf(stderr, "Error: no se pudo abrir %s para escritura\n", fname);
         return;
     }
-    fprintf(f, "t,mass,x,y,z,vx,vy,vz\n");
+    fprintf(f, "t,id,mass,x,y,z,vx,vy,vz\n");
     for (int i = 0; i < n; i++) {
-        fprintf(f, "%.12e,%.12e,%.12e,%.12e,%.12e,%.12e,%.12e,%.12e\n",
-                t, p[i].mass,
+        fprintf(f, "%.12e,%lld,%.12e,%.12e,%.12e,%.12e,%.12e,%.12e,%.12e\n",
+                t, (long long)p[i].id, p[i].mass,
                 p[i].pos[0], p[i].pos[1], p[i].pos[2],
                 p[i].vel[0], p[i].vel[1], p[i].vel[2]);
     }
@@ -126,10 +130,12 @@ int read_particles_csv(const char *fname, Particle *p, int *n) {
     while (fgets(line, sizeof(line), f)) {
         Particle *pi = &p[count];
         memset(pi, 0, sizeof(Particle));
-        if (sscanf(line, "%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf",
-                   &t, &pi->mass,
+        long long id;
+        if (sscanf(line, "%lf,%lld,%lf,%lf,%lf,%lf,%lf,%lf,%lf",
+                   &t, &id, &pi->mass,
                    &pi->pos[0], &pi->pos[1], &pi->pos[2],
-                   &pi->vel[0], &pi->vel[1], &pi->vel[2]) == 8) {
+                   &pi->vel[0], &pi->vel[1], &pi->vel[2]) == 9) {
+            pi->id = (int64_t)id;
             count++;
         }
     }

@@ -68,7 +68,53 @@ int test_bh_force_error(void);
 int test_bh_theta_convergence(void);
 
 /*
- * Ejecuta los 8 tests secuencialmente e imprime un resumen de resultados.
+ * Calcula las fuerzas con 1, 2, 4 y 8 hilos OpenMP y verifica que los tres
+ * últimos resultados sean BIT A BIT idénticos al de 1 hilo (memcmp), tanto en
+ * compute_forces_bh como en compute_forces_direct_par. Cada iteración escribe
+ * solo su propia acc[] y el orden de las sumas no depende del reparto entre
+ * hilos, así que cualquier diferencia delata una carrera de datos.
+ * Sin OpenMP el test no aplica y se reporta como SKIP.
+ */
+int test_openmp_determinism(void);
+
+#ifdef USE_MPI
+
+/*
+ * Integra 5000 partículas durante 100 pasos con migración y verifica que la
+ * suma de n_local sobre todos los procesos sea exactamente N en cada paso.
+ * Colectivo: todos los procesos deben invocarlo.
+ */
+int test_mpi_particle_conservation(void);
+
+/*
+ * Verifica que los checksums globales Σ id y Σ id² sean idénticos antes y
+ * después de 100 pasos con migración. Detecta pérdidas y duplicados; el
+ * segundo momento es necesario porque Σ id sola no distingue un intercambio de
+ * dos identidades. Colectivo.
+ */
+int test_mpi_identity_checksum(void);
+
+/*
+ * Verifica que los splitters sean no decrecientes, cubran todo el espacio de
+ * claves, que cada partícula local caiga dentro del tramo de su proceso, y que
+ * el desbalance max/avg del reparto sea menor a 1.15. Colectivo.
+ */
+int test_mpi_partition_validity(void);
+
+/*
+ * Compara las aceleraciones del camino distribuido completo (particionar,
+ * migrar, replicar, calcular el tramo propio) contra el resultado del cálculo
+ * secuencial sobre el mismo estado inicial, emparejando las partículas por id
+ * porque la migración las permuta. Criterio: error relativo máximo < 1e-12.
+ * Colectivo.
+ */
+int test_mpi_forces_vs_sequential(void);
+
+#endif /* USE_MPI */
+
+/*
+ * Ejecuta la suite completa e imprime un resumen. Son 9 tests en la versión
+ * secuencial y 13 en la versión MPI (los 4 distribuidos requieren mpirun).
  * Retorna 0 si todos pasan, 1 si alguno falla (compatible con exit code).
  */
 int run_all_tests(void);
