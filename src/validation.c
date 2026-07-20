@@ -3,6 +3,8 @@
 #include "force.h"
 #include "leapfrog.h"
 #include "morton.h"
+#include "octree.h"
+#include "barnes_hut.h"
 #include "vec3.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -190,14 +192,159 @@ int test_morton_ordering(void) {
     return pass;
 }
 
+/* Error relativo L2 global entre dos campos de aceleracion. */
+static double accel_l2_error(const Particle *ref, const Particle *bh, int n) {
+    double num = 0.0, den = 0.0;
+    for (int i = 0; i < n; i++) {
+        double d[3];
+        VEC3_SUB(d, bh[i].acc, ref[i].acc);
+        num += VEC3_DOT(d, d);
+        den += VEC3_DOT(ref[i].acc, ref[i].acc);
+    }
+    return sqrt(num / den);
+}
+
+int test_tree_mass(void) {
+    printf("=== Test 5: Conservacion de masa del arbol ===\n");
+
+    int n = 1000;
+    Particle *p = malloc(n * sizeof(Particle));
+    init_plummer(p, n, 42);
+
+    double total = 0.0;
+    for (int i = 0; i < n; i++) total += p[i].mass;
+
+    Octree *t = octree_build(p, n);
+    octree_compute_mass(t, p);
+    double root_mass = t->nodes[t->root].mass;
+
+    double err = fabs(root_mass - total) / total;
+    printf("  Masa total (suma directa): %.15e\n", total);
+    printf("  Masa de la raiz:           %.15e\n", root_mass);
+    printf("  Error relativo: %.6e\n", err);
+
+    int pass = err < 1e-12;
+    printf("  Resultado: %s\n\n", pass ? "PASS" : "FAIL");
+
+    octree_free(t);
+    free(p);
+    return pass;
+}
+
+int test_tree_cm(void) {
+    printf("=== Test 6: Centro de masa del arbol ===\n");
+
+    int n = 1000;
+    Particle *p = malloc(n * sizeof(Particle));
+    init_plummer(p, n, 42);
+
+    double total = 0.0, cm[3] = {0, 0, 0};
+    for (int i = 0; i < n; i++) {
+        total += p[i].mass;
+        for (int k = 0; k < 3; k++) cm[k] += p[i].mass * p[i].pos[k];
+    }
+    for (int k = 0; k < 3; k++) cm[k] /= total;
+
+    Octree *t = octree_build(p, n);
+    octree_compute_mass(t, p);
+    double *rcm = t->nodes[t->root].cm;
+
+    double d[3];
+    VEC3_SUB(d, rcm, cm);
+    double err = VEC3_NORM(d);
+    printf("  CM directo: (%.6e, %.6e, %.6e)\n", cm[0], cm[1], cm[2]);
+    printf("  CM raiz:    (%.6e, %.6e, %.6e)\n", rcm[0], rcm[1], rcm[2]);
+    printf("  |diferencia|: %.6e\n", err);
+
+    int pass = err < 1e-10;
+    printf("  Resultado: %s\n\n", pass ? "PASS" : "FAIL");
+
+    octree_free(t);
+    free(p);
+    return pass;
+}
+
+int test_bh_force_error(void) {
+    printf("=== Test 7: Error de fuerza Barnes-Hut vs directo (theta=0.5) ===\n");
+
+    int n = 1000;
+    double softening = 0.01, theta = 0.5;
+    Particle *ref = malloc(n * sizeof(Particle));
+    init_plummer(ref, n, 42);
+
+    Particle *bh = malloc(n * sizeof(Particle));
+    memcpy(bh, ref, n * sizeof(Particle));
+
+    compute_forces_direct(ref, n, softening);
+
+    Octree *t = octree_build(bh, n);
+    octree_compute_mass(t, bh);
+    compute_forces_bh(t, bh, n, theta, softening);
+
+    double err = accel_l2_error(ref, bh, n);
+    printf("  Error relativo L2 de la aceleracion: %.6e\n", err);
+
+    int pass = err < 1e-2;
+    printf("  Resultado: %s\n\n", pass ? "PASS" : "FAIL");
+
+    octree_free(t);
+    free(bh);
+    free(ref);
+    return pass;
+}
+
+int test_bh_theta_convergence(void) {
+    printf("=== Test 8: Convergencia en theta ===\n");
+
+    int n = 1000;
+    double softening = 0.01;
+    double thetas[4] = {0.8, 0.5, 0.2, 0.0};
+
+    Particle *ref = malloc(n * sizeof(Particle));
+    init_plummer(ref, n, 42);
+    compute_forces_direct(ref, n, softening);
+
+    double errs[4];
+    for (int idx = 0; idx < 4; idx++) {
+        Particle *bh = malloc(n * sizeof(Particle));
+        memcpy(bh, ref, n * sizeof(Particle));
+        Octree *t = octree_build(bh, n);
+        octree_compute_mass(t, bh);
+        compute_forces_bh(t, bh, n, thetas[idx], softening);
+        errs[idx] = accel_l2_error(ref, bh, n);
+        printf("  theta = %.1f  ->  error L2 = %.6e\n", thetas[idx], errs[idx]);
+        octree_free(t);
+        free(bh);
+    }
+
+    int monotone = 1;
+    for (int idx = 1; idx < 4; idx++)
+        if (errs[idx] > errs[idx-1]) monotone = 0;
+
+    int exact = errs[3] < 1e-9;  /* theta=0 reproduce el metodo directo */
+
+    printf("  Monotono decreciente: %s\n", monotone ? "si" : "no");
+    printf("  theta=0 reproduce directo (err < 1e-9): %s\n", exact ? "si" : "no");
+
+    int pass = monotone && exact;
+    printf("  Resultado: %s\n\n", pass ? "PASS" : "FAIL");
+
+    free(ref);
+    return pass;
+}
+
 int run_all_tests(void) {
     printf("\n========== SUITE DE VALIDACION ==========\n\n");
 
-    int total = 4, passed = 0;
+    int total = 8, passed = 0;
     passed += test_two_body_orbit();
     passed += test_energy_conservation();
     passed += test_momentum_conservation();
     passed += test_morton_ordering();
+    passed += test_tree_mass();
+    passed += test_tree_cm();
+    passed += test_bh_force_error();
+    passed += test_bh_theta_convergence();
 
     printf("========== RESULTADO: %d/%d tests pasaron ==========\n\n", passed, total);
     return (passed == total) ? 0 : 1;

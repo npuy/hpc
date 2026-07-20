@@ -7,6 +7,8 @@
 #include "force.h"
 #include "leapfrog.h"
 #include "morton.h"
+#include "octree.h"
+#include "barnes_hut.h"
 #include "validation.h"
 #include "vec3.h"
 
@@ -18,6 +20,8 @@ static void print_usage(const char *prog) {
     printf("  -s EPS        Softening (default: 0.01)\n");
     printf("  -o FILE       Archivo de salida CSV\n");
     printf("  --init TYPE   Tipo de init: plummer|uniform|twobody (default: plummer)\n");
+    printf("  --method M    Metodo de fuerza: direct|bh (default: bh)\n");
+    printf("  --theta T     Angulo de apertura Barnes-Hut (default: 0.5)\n");
     printf("  --validate    Correr suite de validacion\n");
     printf("  --seed SEED   Semilla aleatoria (default: 42)\n");
 }
@@ -29,6 +33,8 @@ int main(int argc, char *argv[]) {
     double softening = 0.01;
     char *output = NULL;
     char *init_type = "plummer";
+    char *method = "bh";
+    double theta = 0.5;
     int validate = 0;
     unsigned seed = 42;
     int snapshot_interval = 100;
@@ -46,6 +52,10 @@ int main(int argc, char *argv[]) {
             output = argv[++i];
         else if (strcmp(argv[i], "--init") == 0 && i+1 < argc)
             init_type = argv[++i];
+        else if (strcmp(argv[i], "--method") == 0 && i+1 < argc)
+            method = argv[++i];
+        else if (strcmp(argv[i], "--theta") == 0 && i+1 < argc)
+            theta = atof(argv[++i]);
         else if (strcmp(argv[i], "--validate") == 0)
             validate = 1;
         else if (strcmp(argv[i], "--seed") == 0 && i+1 < argc)
@@ -59,9 +69,15 @@ int main(int argc, char *argv[]) {
     if (validate)
         return run_all_tests();
 
+    int use_bh = (strcmp(method, "bh") == 0);
+
     printf("N-Body Simulacion Secuencial\n");
     printf("  N = %d, dt = %g, t_end = %g, softening = %g\n", N, dt, t_end, softening);
-    printf("  Init: %s, seed: %u\n\n", init_type, seed);
+    printf("  Init: %s, seed: %u\n", init_type, seed);
+    if (use_bh)
+        printf("  Metodo: Barnes-Hut (theta = %g)\n\n", theta);
+    else
+        printf("  Metodo: directo O(N^2)\n\n");
 
     Particle *particles = malloc(N * sizeof(Particle));
     if (!particles) {
@@ -88,9 +104,19 @@ int main(int argc, char *argv[]) {
     }
     morton_sort(particles, N, mn, mx);
 
-    compute_forces_direct(particles, N, softening);
-
-    double E0 = kinetic_energy(particles, N) + potential_energy(particles, N, softening);
+    /* Fuerzas y energia iniciales segun el metodo seleccionado */
+    double E0;
+    if (use_bh) {
+        Octree *tree = octree_build(particles, N);
+        octree_compute_mass(tree, particles);
+        compute_forces_bh(tree, particles, N, theta, softening);
+        E0 = kinetic_energy(particles, N)
+           + potential_energy_bh(tree, particles, N, theta, softening);
+        octree_free(tree);
+    } else {
+        compute_forces_direct(particles, N, softening);
+        E0 = kinetic_energy(particles, N) + potential_energy(particles, N, softening);
+    }
     printf("Energia inicial E0 = %.10e\n", E0);
 
     if (output)
@@ -101,15 +127,32 @@ int main(int argc, char *argv[]) {
 
     int step = 0;
     int total_steps = (int)(t_end / dt);
+    double Ef = E0;
 
     for (double t = 0; t < t_end - dt * 0.5; t += dt, step++) {
         leapfrog_kick(particles, N, dt / 2.0);
         leapfrog_drift(particles, N, dt);
-        compute_forces_direct(particles, N, softening);
+
+        double E = 0.0;
+        int is_snapshot = (snapshot_interval > 0 && step % snapshot_interval == 0);
+
+        if (use_bh) {
+            Octree *tree = octree_build(particles, N);
+            octree_compute_mass(tree, particles);
+            compute_forces_bh(tree, particles, N, theta, softening);
+            if (is_snapshot)
+                E = kinetic_energy(particles, N)
+                  + potential_energy_bh(tree, particles, N, theta, softening);
+            octree_free(tree);
+        } else {
+            compute_forces_direct(particles, N, softening);
+            if (is_snapshot)
+                E = kinetic_energy(particles, N) + potential_energy(particles, N, softening);
+        }
+
         leapfrog_kick(particles, N, dt / 2.0);
 
-        if (snapshot_interval > 0 && step % snapshot_interval == 0) {
-            double E = kinetic_energy(particles, N) + potential_energy(particles, N, softening);
+        if (is_snapshot) {
             double drift = fabs(E - E0) / fabs(E0);
             printf("  paso %d/%d  t=%.4f  E=%.10e  drift=%.4e\n",
                    step, total_steps, t + dt, E, drift);
@@ -120,7 +163,16 @@ int main(int argc, char *argv[]) {
     double wall_time = (ts_end.tv_sec - ts_start.tv_sec)
                      + (ts_end.tv_nsec - ts_start.tv_nsec) * 1e-9;
 
-    double Ef = kinetic_energy(particles, N) + potential_energy(particles, N, softening);
+    /* Energia final con el mismo metodo usado en la simulacion */
+    if (use_bh) {
+        Octree *tree = octree_build(particles, N);
+        octree_compute_mass(tree, particles);
+        Ef = kinetic_energy(particles, N)
+           + potential_energy_bh(tree, particles, N, theta, softening);
+        octree_free(tree);
+    } else {
+        Ef = kinetic_energy(particles, N) + potential_energy(particles, N, softening);
+    }
     double final_drift = fabs(Ef - E0) / fabs(E0);
 
     printf("\n=== Resultado final ===\n");

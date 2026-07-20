@@ -40,7 +40,35 @@ int test_momentum_conservation(void);
 int test_morton_ordering(void);
 
 /*
- * Ejecuta los 4 tests secuencialmente e imprime un resumen de resultados.
+ * Construye el octree de 1000 partículas Plummer y verifica que la masa de la
+ * raíz coincida con la suma directa de masas (error relativo < 10⁻¹²). Valida
+ * la acumulación bottom-up de octree_compute_mass.
+ */
+int test_tree_mass(void);
+
+/*
+ * Verifica que el centro de masa de la raíz del octree coincida con el CM
+ * calculado por suma directa (‖diferencia‖ < 10⁻¹⁰). Valida el promedio
+ * ponderado por masa en los nodos internos.
+ */
+int test_tree_cm(void);
+
+/*
+ * Compara la aceleración Barnes-Hut (θ=0.5) contra el método directo O(N²)
+ * sobre 1000 partículas Plummer y verifica que el error relativo L2 < 1%.
+ * Valida el criterio de apertura y el recorrido del árbol.
+ */
+int test_bh_force_error(void);
+
+/*
+ * Barre θ ∈ {0.8, 0.5, 0.2, 0.0} y verifica que el error respecto al método
+ * directo decrezca monótonamente y que θ=0 lo reproduzca (error < 10⁻⁹).
+ * Valida la consistencia del esquema de aproximación.
+ */
+int test_bh_theta_convergence(void);
+
+/*
+ * Ejecuta los 8 tests secuencialmente e imprime un resumen de resultados.
  * Retorna 0 si todos pasan, 1 si alguno falla (compatible con exit code).
  */
 int run_all_tests(void);

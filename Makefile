@@ -3,8 +3,10 @@ MPICC = mpicc
 CFLAGS = -O2 -Wall -Wextra
 LDFLAGS = -lm
 
-SRC = src/main.c src/particle.c src/force.c src/leapfrog.c src/morton.c src/validation.c
-HDR = src/vec3.h src/particle.h src/force.h src/leapfrog.h src/morton.h src/validation.h
+SRC = src/main.c src/particle.c src/force.c src/leapfrog.c src/morton.c \
+      src/octree.c src/barnes_hut.c src/validation.c
+HDR = src/vec3.h src/particle.h src/force.h src/leapfrog.h src/morton.h \
+      src/octree.h src/barnes_hut.h src/validation.h
 
 .PHONY: all clean
 
