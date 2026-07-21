@@ -41,6 +41,7 @@ typedef struct {
     int      show_metrics;
     int      use_let;       /* 1 = LET (etapa 8), 0 = replica global (semana 3) */
     int      balance_work;  /* 1 = reparto por costo, 0 = por conteo */
+    int      use_orb;       /* 1 = dominios ORB (cajas), 0 = rangos Morton */
     double   theta_let;     /* theta del criterio de exportacion; <0 = usar theta */
 } Config;
 
@@ -58,6 +59,7 @@ static void print_usage(const char *prog) {
     printf("  --rebalance-every K  Reparticion cada K pasos, solo MPI (default: 20)\n");
     printf("  --exchange E  Intercambio: let|replicate, solo MPI (default: let)\n");
     printf("  --balance B   Reparto: work|count, solo MPI (default: work)\n");
+    printf("  --decomp D    Descomposicion: orb|morton, solo MPI (default: orb)\n");
     printf("  --theta-let T Theta del criterio de exportacion LET (default: =theta)\n");
     printf("  --metrics     Desglose de tiempo por fase, solo MPI\n");
     printf("  --validate    Correr suite de validacion\n");
@@ -208,12 +210,18 @@ static int run_sequential(const Config *c) {
  * splitters solo tienen sentido sobre el espacio de claves que las produjo.
  */
 static void repartition(Domain *d, Particle *local, int n_local,
-                        int64_t n_global, int use_work, MPI_Comm comm) {
+                        int64_t n_global, int use_work, int use_orb,
+                        MPI_Comm comm) {
     domain_global_bounds(d, local, n_local, comm);
     double gmin[3], gmax[3];
     for (int k = 0; k < 3; k++) { gmin[k] = d->gmin[k]; gmax[k] = d->gmax[k]; }
+    /* El orden Morton se mantiene en los dos caminos, pero por razones
+       distintas: con Morton es la precondicion de la busqueda binaria de
+       domain_partition; con ORB es solo localidad de cache para construir el
+       arbol y recorrerlo. */
     morton_sort(local, n_local, gmin, gmax);
-    domain_partition_ex(d, local, n_local, n_global, use_work, comm);
+    if (use_orb) domain_partition_orb(d, local, n_local, use_work, comm);
+    else         domain_partition_ex(d, local, n_local, n_global, use_work, comm);
 }
 
 /*
@@ -314,6 +322,7 @@ static int run_mpi(const Config *c) {
         printf("  Intercambio: %s\n", c->use_let ? "LET" : "replicacion global");
         if (c->use_let && c->theta_let >= 0.0)
             printf("  Theta de exportacion LET: %g\n", c->theta_let);
+        printf("  Descomposicion: %s\n", c->use_orb ? "ORB (cajas)" : "rangos Morton");
         printf("  Reparto: por %s\n", c->balance_work ? "costo (work)" : "conteo");
         printf("  Reparticion cada %d pasos\n\n", c->rebalance_every);
     }
@@ -336,7 +345,7 @@ static int run_mpi(const Config *c) {
     /* Descomposicion espacial: cada proceso queda con un tramo Morton contiguo. */
     Domain d;
     domain_init(&d, comm);
-    repartition(&d, local, n_local, N, 0, comm);
+    repartition(&d, local, n_local, N, 0, c->use_orb, comm);
     n_local = migrate_particles(&local, n_local, &capacity, &d, ptype, comm);
 
     int64_t id_sum0, id_sum20;
@@ -389,7 +398,7 @@ static int run_mpi(const Config *c) {
            Migrar al final del paso romperia la contiguidad de [offset, offset+n). */
         tmark = metrics_now();
         if (c->rebalance_every > 0 && step % c->rebalance_every == 0)
-            repartition(&d, local, n_local, N, c->balance_work, comm);
+            repartition(&d, local, n_local, N, c->balance_work, c->use_orb, comm);
         n_local = migrate_particles(&local, n_local, &capacity, &d, ptype, comm);
         m.migrate_time += metrics_now() - tmark;
 
@@ -502,7 +511,8 @@ int main(int argc, char *argv[]) {
         .N = 1000, .dt = 0.001, .t_end = 1.0, .softening = 0.01,
         .output = NULL, .init_type = "plummer", .use_bh = 1, .theta = 0.5,
         .seed = 42, .snapshot_interval = 100, .rebalance_every = 20,
-        .show_metrics = 0, .use_let = 1, .balance_work = 1, .theta_let = -1.0
+        .show_metrics = 0, .use_let = 1, .balance_work = 1, .theta_let = -1.0,
+        .use_orb = 1
     };
     int validate = 0;
     int threads = 0;
@@ -531,6 +541,8 @@ int main(int argc, char *argv[]) {
             c.rebalance_every = atoi(argv[++i]);
         else if (strcmp(argv[i], "--exchange") == 0 && i+1 < argc)
             c.use_let = (strcmp(argv[++i], "replicate") != 0);
+        else if (strcmp(argv[i], "--decomp") == 0 && i+1 < argc)
+            c.use_orb = (strcmp(argv[++i], "morton") != 0);
         else if (strcmp(argv[i], "--balance") == 0 && i+1 < argc)
             c.balance_work = (strcmp(argv[++i], "count") != 0);
         else if (strcmp(argv[i], "--theta-let") == 0 && i+1 < argc)

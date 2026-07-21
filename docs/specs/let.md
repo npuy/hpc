@@ -102,12 +102,17 @@ del test 13 (error exactamente 0.0) no se puede sostener. Escalera de validació
 sistema, porque el LET resume pero no descarta. Detecta casi cualquier bug de
 selección sin comparar contra una referencia secuencial. Medido: **4.9e-14**.
 
-## ⚠ Limitación conocida: no comprime sobre Plummer
+## Historia: el LET dependía de la descomposición
 
-`n_ghost` crece **linealmente** con N (exponente medido k=0.92), la misma
-asintótica que la réplica. Causa: un tramo Morton contiguo **no** es una región
-compacta, y el AABB del destino llega a cubrir el 44,6% del dominio. Ver
-[week4-report.md](../week4-report.md), sección "Por qué el LET no comprime".
+Con rangos Morton (semana 4) este mismo código **no comprimía**: `n_ghost` crecía
+como N^0,92, la misma asintótica que la réplica, porque un tramo Morton contiguo
+no es una región compacta y el AABB del destino cubría el 44,6% del dominio.
 
-Lo arreglaría ORB (dominios que son cajas por construcción). Ver
-[balance.md](balance.md) para la maquinaria de bisección reutilizable.
+La semana 5 reemplazó la descomposición por [ORB](orb.md) y `let.c` **no necesitó
+un solo cambio**: el criterio ya era correcto, lo que fallaba era la geometría que
+recibía. Con dominios que son cajas, el exponente bajó a **0,66**, cerca del 2/3
+de un efecto de superficie.
+
+Es el ejemplo más claro del trabajo de que correcto y efectivo son propiedades
+distintas: la suite certificaba lo primero (θ=0 bit a bit, masa a 5e-14) y era
+completamente ciega a lo segundo.

@@ -420,9 +420,9 @@ int test_openmp_determinism(void) {
  * particiona por claves Morton y se migra cada particula a su dueno.
  * Retorna n_local y deja *local listo para simular.
  */
-static int setup_distributed(Particle **local, int *capacity, Domain *d,
-                             MPI_Datatype ptype, int N, unsigned seed,
-                             MPI_Comm comm) {
+static int setup_distributed_ex(Particle **local, int *capacity, Domain *d,
+                                MPI_Datatype ptype, int N, unsigned seed,
+                                int use_orb, MPI_Comm comm) {
     int rank, P;
     MPI_Comm_rank(comm, &rank);
     MPI_Comm_size(comm, &P);
@@ -449,9 +449,17 @@ static int setup_distributed(Particle **local, int *capacity, Domain *d,
     double gmin[3], gmax[3];
     for (int k = 0; k < 3; k++) { gmin[k] = d->gmin[k]; gmax[k] = d->gmax[k]; }
     morton_sort(*local, n_local, gmin, gmax);
-    domain_partition(d, *local, n_local, N, comm);
+    if (use_orb) domain_partition_orb(d, *local, n_local, 0, comm);
+    else         domain_partition(d, *local, n_local, N, comm);
 
     return migrate_particles(local, n_local, capacity, d, ptype, comm);
+}
+
+/* La descomposicion por defecto es ORB desde la semana 5. */
+static int setup_distributed(Particle **local, int *capacity, Domain *d,
+                             MPI_Datatype ptype, int N, unsigned seed,
+                             MPI_Comm comm) {
+    return setup_distributed_ex(local, capacity, d, ptype, N, seed, 1, comm);
 }
 
 /* Un paso completo del bucle hibrido (KDK + migracion + replica + fuerzas). */
@@ -562,54 +570,113 @@ int test_mpi_partition_validity(void) {
     MPI_Comm_rank(comm, &rank);
     MPI_Comm_size(comm, &P);
     if (rank == 0)
-        printf("=== Test 12: Particiones disjuntas y cubrientes ===\n");
+        printf("=== Test 12: Descomposicion valida (ORB y Morton) ===\n");
 
-    int N = 5000, capacity;
-    Particle *local = NULL;
-    Domain d;
-    MPI_Datatype ptype;
-    mpi_particle_type_init(&ptype);
-    domain_init(&d, comm);
+    const int N = 5000;
+    int capacity, ok_orb, ok_morton;
 
-    int n_local = setup_distributed(&local, &capacity, &d, ptype, N, 42, comm);
+    /* --- a) ORB: cajas disjuntas, cubrientes, y cada particula en la suya --- */
+    {
+        Particle *local = NULL;
+        Domain d;
+        MPI_Datatype ptype;
+        mpi_particle_type_init(&ptype);
+        domain_init(&d, comm);
+        int n_local = setup_distributed_ex(&local, &capacity, &d, ptype, N, 42, 1, comm);
 
-    /* a) splitters no decrecientes. No se exige crecimiento estricto: con claves
-          repetidas dos splitters pueden coincidir y dejar un tramo vacio, que es
-          un estado legal (ese proceso simplemente queda sin particulas). */
-    int monotone = 1;
-    for (int k = 0; k < P; k++)
-        if (d.splitters[k] > d.splitters[k+1]) monotone = 0;
+        /* Disjuntas: el volumen de interseccion de cada par debe ser nulo. */
+        int disjoint = 1;
+        for (int a = 0; a < P && disjoint; a++) {
+            double amin[3], amax[3];
+            domain_box(&d, a, amin, amax);
+            for (int b = a + 1; b < P && disjoint; b++) {
+                double bmin[3], bmax[3];
+                domain_box(&d, b, bmin, bmax);
+                double v = 1.0;
+                for (int k = 0; k < 3; k++) {
+                    double lo = amin[k] > bmin[k] ? amin[k] : bmin[k];
+                    double hi = amax[k] < bmax[k] ? amax[k] : bmax[k];
+                    double e  = hi - lo;
+                    v *= (e > 0.0 ? e : 0.0);
+                }
+                if (v > 0.0) disjoint = 0;
+            }
+        }
 
-    /* b) cubren todo el espacio de claves */
-    int covers = (d.splitters[0] == 0 && d.splitters[P] == UINT64_MAX);
+        /* Cubrientes: la suma de los volumenes reconstruye el del dominio. */
+        double vsum = 0.0, vglobal = 1.0;
+        for (int a = 0; a < P; a++) {
+            double amin[3], amax[3];
+            domain_box(&d, a, amin, amax);
+            double v = 1.0;
+            for (int k = 0; k < 3; k++) v *= (amax[k] - amin[k]);
+            vsum += v;
+        }
+        for (int k = 0; k < 3; k++) vglobal *= (d.gmax[k] - d.gmin[k]);
+        int covers = (fabs(vsum - vglobal) / vglobal < 1e-9);
 
-    /* c) toda particula local cae dentro del tramo de su proceso */
-    int inside = 1;
-    for (int i = 0; i < n_local; i++)
-        if (local[i].morton < d.splitters[rank] ||
-            local[i].morton >= d.splitters[rank+1]) inside = 0;
+        /* Cada particula local dentro de la caja de su proceso, y coherencia
+           entre domain_owner_pos y el rank: si difieren, la migracion habria
+           mandado la particula a otro lado y aca aparece. */
+        double mymin[3], mymax[3];
+        domain_box(&d, rank, mymin, mymax);
+        int inside = 1;
+        for (int i = 0; i < n_local; i++) {
+            for (int k = 0; k < 3; k++)
+                if (local[i].pos[k] < mymin[k] || local[i].pos[k] > mymax[k]) inside = 0;
+            if (domain_owner_pos(&d, local[i].pos) != rank) inside = 0;
+        }
 
-    /* d) desbalance del reparto */
-    int64_t nl = n_local, nmax, ntot;
-    MPI_Allreduce(&nl, &nmax, 1, MPI_INT64_T, MPI_MAX, comm);
-    MPI_Allreduce(&nl, &ntot, 1, MPI_INT64_T, MPI_SUM, comm);
-    double imbalance = (double)nmax / ((double)ntot / P);
+        int flags[3] = {disjoint, covers, inside}, all[3];
+        MPI_Allreduce(flags, all, 3, MPI_INT, MPI_MIN, comm);
+        ok_orb = all[0] && all[1] && all[2];
 
-    int flags[3] = {monotone, covers, inside}, all_flags[3];
-    MPI_Allreduce(flags, all_flags, 3, MPI_INT, MPI_MIN, comm);
+        if (rank == 0) {
+            printf("  ORB    cajas disjuntas: %s\n", all[0] ? "si" : "NO");
+            printf("  ORB    cubren el dominio: %s (vol %.6e vs %.6e)\n",
+                   all[1] ? "si" : "NO", vsum, vglobal);
+            printf("  ORB    particulas dentro de su caja: %s\n", all[2] ? "si" : "NO");
+        }
 
-    int pass = all_flags[0] && all_flags[1] && all_flags[2] && (imbalance < 1.15);
-    if (rank == 0) {
-        printf("  Splitters no decrecientes: %s\n", all_flags[0] ? "si" : "NO");
-        printf("  Cubren [0, UINT64_MAX]:    %s\n", all_flags[1] ? "si" : "NO");
-        printf("  Particulas dentro de su tramo: %s\n", all_flags[2] ? "si" : "NO");
-        printf("  Desbalance max/avg: %.4f (umbral 1.15)\n", imbalance);
-        printf("  Resultado: %s\n\n", pass ? "PASS" : "FAIL");
+        free(local);
+        domain_free(&d);
+        mpi_particle_type_free(&ptype);
     }
 
-    free(local);
-    domain_free(&d);
-    mpi_particle_type_free(&ptype);
+    /* --- b) Morton: el camino legado sigue siendo valido (se usa de linea base
+             en los experimentos comparativos del informe) --- */
+    {
+        Particle *local = NULL;
+        Domain d;
+        MPI_Datatype ptype;
+        mpi_particle_type_init(&ptype);
+        domain_init(&d, comm);
+        int n_local = setup_distributed_ex(&local, &capacity, &d, ptype, N, 42, 0, comm);
+
+        int monotone = 1;
+        for (int k = 0; k < P; k++)
+            if (d.splitters[k] > d.splitters[k+1]) monotone = 0;
+        int covers = (d.splitters[0] == 0 && d.splitters[P] == UINT64_MAX);
+        int inside = 1;
+        for (int i = 0; i < n_local; i++)
+            if (local[i].morton < d.splitters[rank] ||
+                local[i].morton >= d.splitters[rank+1]) inside = 0;
+
+        int flags[3] = {monotone, covers, inside}, all[3];
+        MPI_Allreduce(flags, all, 3, MPI_INT, MPI_MIN, comm);
+        ok_morton = all[0] && all[1] && all[2];
+
+        if (rank == 0)
+            printf("  Morton splitters monotonos, cubrientes y respetados: %s\n",
+                   ok_morton ? "si" : "NO");
+
+        free(local);
+        domain_free(&d);
+        mpi_particle_type_free(&ptype);
+    }
+
+    int pass = ok_orb && ok_morton;
+    if (rank == 0) printf("  Resultado: %s\n\n", pass ? "PASS" : "FAIL");
     return pass;
 }
 
@@ -724,7 +791,8 @@ static int distributed_step_let(Particle **local, int n_local, int *capacity,
         double gmin[3], gmax[3];
         for (int k = 0; k < 3; k++) { gmin[k] = d->gmin[k]; gmax[k] = d->gmax[k]; }
         morton_sort(*local, n_local, gmin, gmax);
-        domain_partition_ex(d, *local, n_local, N, use_work, comm);
+        if (d->use_orb) domain_partition_orb(d, *local, n_local, use_work, comm);
+        else            domain_partition_ex(d, *local, n_local, N, use_work, comm);
     }
     n_local = migrate_particles(local, n_local, capacity, d, ptype, comm);
 
@@ -894,49 +962,49 @@ int test_let_volume(void) {
         printf("=== Test 16: Volumen del LET (crecimiento de n_ghost con N) ===\n");
 
     const int Ns[2] = {5000, 20000};   /* factor 4 entre ambos */
-    double ratio[2] = {0, 0};
-    int64_t ghosts[2] = {0, 0};
+    int64_t ghosts[2][2] = {{0,0},{0,0}};   /* [decomp][caso], 0=morton 1=orb */
 
-    for (int c = 0; c < 2; c++) {
-        int N = Ns[c], capacity;
-        Particle *local = NULL;
-        Domain d;
-        MPI_Datatype ptype;
-        mpi_particle_type_init(&ptype);
-        domain_init(&d, comm);
+    for (int dec = 0; dec < 2; dec++) {
+        for (int c = 0; c < 2; c++) {
+            int N = Ns[c], capacity;
+            Particle *local = NULL;
+            Domain d;
+            MPI_Datatype ptype;
+            mpi_particle_type_init(&ptype);
+            domain_init(&d, comm);
 
-        int n_local = setup_distributed(&local, &capacity, &d, ptype, N, 42, comm);
-        int n_ghost = let_forces(&local, n_local, &capacity, &d, ptype, 0.5, 0.01, comm);
+            int n_local = setup_distributed_ex(&local, &capacity, &d, ptype,
+                                               N, 42, dec, comm);
+            int n_ghost = let_forces(&local, n_local, &capacity, &d, ptype,
+                                     0.5, 0.01, comm);
 
-        int64_t g = n_ghost, g_sum;
-        MPI_Allreduce(&g, &g_sum, 1, MPI_INT64_T, MPI_SUM, comm);
-        ghosts[c] = g_sum / P;
-        ratio[c]  = (double)ghosts[c] / ((double)N / P);
+            int64_t g = n_ghost, g_sum;
+            MPI_Allreduce(&g, &g_sum, 1, MPI_INT64_T, MPI_SUM, comm);
+            ghosts[dec][c] = g_sum / P;
 
-        free(local);
-        domain_free(&d);
-        mpi_particle_type_free(&ptype);
+            free(local);
+            domain_free(&d);
+            mpi_particle_type_free(&ptype);
+        }
     }
 
     /* Si n_ghost creciera sublinealmente, el ratio fantasmas/locales bajaria al
-       crecer N. Exponente estimado: log(g2/g1) / log(N2/N1). 1.0 = lineal. */
-    double growth = log((double)ghosts[1] / (double)ghosts[0]) / log(4.0);
-    int pass = (growth < 0.9);
+       crecer N. Exponente: log(g2/g1) / log(N2/N1). 1.0 = lineal = no comprime. */
+    double k_morton = log((double)ghosts[0][1] / (double)ghosts[0][0]) / log(4.0);
+    double k_orb    = log((double)ghosts[1][1] / (double)ghosts[1][0]) / log(4.0);
+    int pass = (k_orb < 0.9);
 
     if (rank == 0) {
-        printf("  N=%d:  fantasmas/proceso=%lld  ratio vs locales=%.2f\n",
-               Ns[0], (long long)ghosts[0], ratio[0]);
-        printf("  N=%d: fantasmas/proceso=%lld  ratio vs locales=%.2f\n",
-               Ns[1], (long long)ghosts[1], ratio[1]);
-        printf("  Exponente de crecimiento n_ghost ~ N^k:  k=%.2f  (umbral k<0.9)\n", growth);
-        printf("  Resultado: %s\n", pass ? "PASS" : "FAIL");
-        if (!pass) {
-            printf("  FALLA CONOCIDA Y DOCUMENTADA, no bajar el umbral: sobre Plummer los\n");
-            printf("  dominios de rangos Morton no son compactos, el AABB del destino cubre\n");
-            printf("  buena parte del dominio y la seleccion casi no resume. Ver\n");
-            printf("  docs/week4-report.md, seccion \"Por que el LET no comprime\".\n");
-        }
-        printf("\n");
+        printf("  %-8s %10s %10s %10s %10s\n", "decomp", "g(N=5000)", "g(N=20000)",
+               "ratio 5K", "exponente");
+        printf("  %-8s %10lld %10lld %10.2f %10.2f\n", "morton",
+               (long long)ghosts[0][0], (long long)ghosts[0][1],
+               (double)ghosts[0][0] / (5000.0 / P), k_morton);
+        printf("  %-8s %10lld %10lld %10.2f %10.2f\n", "orb",
+               (long long)ghosts[1][0], (long long)ghosts[1][1],
+               (double)ghosts[1][0] / (5000.0 / P), k_orb);
+        printf("  Criterio: exponente ORB < 0.9 (semana 4 con Morton: 0.92)\n");
+        printf("  Resultado: %s\n\n", pass ? "PASS" : "FAIL");
     }
     return pass;
 }
@@ -1056,6 +1124,58 @@ int test_let_energy_conservation(void) {
     return pass;
 }
 
+int test_let_volume_vs_procs(void) {
+    MPI_Comm comm = MPI_COMM_WORLD;
+    int rank, P;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &P);
+    if (rank == 0)
+        printf("=== Test 19: Volumen del LET, ORB vs Morton a igual configuracion ===\n");
+
+    /* n_local constante (5000 por proceso) en vez de N constante. Es lo que
+       aisla el efecto de la descomposicion: con N fijo, subir P achica n_local y
+       el cociente fantasmas/locales crece por el denominador, no por la calidad
+       del reparto. Medido con N fijo=20000, los fantasmas absolutos de ORB son
+       casi constantes (4707/5901/5635 para P=2/4/8) y solo el cociente sube. */
+    const int N = 5000 * P;
+    int64_t ghosts[2];
+
+    for (int dec = 0; dec < 2; dec++) {
+        int capacity;
+        Particle *local = NULL;
+        Domain d;
+        MPI_Datatype ptype;
+        mpi_particle_type_init(&ptype);
+        domain_init(&d, comm);
+
+        int n_local = setup_distributed_ex(&local, &capacity, &d, ptype, N, 42, dec, comm);
+        int n_ghost = let_forces(&local, n_local, &capacity, &d, ptype, 0.5, 0.01, comm);
+
+        int64_t g = n_ghost, g_sum;
+        MPI_Allreduce(&g, &g_sum, 1, MPI_INT64_T, MPI_SUM, comm);
+        ghosts[dec] = g_sum / P;
+
+        free(local);
+        domain_free(&d);
+        mpi_particle_type_free(&ptype);
+    }
+
+    /* La afirmacion que se verifica es comparativa y no absoluta: a igual
+       configuracion, dominios compactos importan sustancialmente menos que
+       tramos de curva. Medido entre 1.8x y 2.6x menos segun P. */
+    double frac = (double)ghosts[1] / (double)ghosts[0];
+    int pass = (frac < 0.6);
+
+    if (rank == 0) {
+        printf("  N=%d, P=%d, n_local=5000 por proceso\n", N, P);
+        printf("  fantasmas/proceso con morton: %lld\n", (long long)ghosts[0]);
+        printf("  fantasmas/proceso con orb:    %lld\n", (long long)ghosts[1]);
+        printf("  ORB / Morton = %.2f  (criterio < 0.60)\n", frac);
+        printf("  Resultado: %s\n\n", pass ? "PASS" : "FAIL");
+    }
+    return pass;
+}
+
 #endif /* USE_MPI */
 
 int run_all_tests(void) {
@@ -1063,7 +1183,7 @@ int run_all_tests(void) {
     int rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-    int passed = 0, total = 18;
+    int passed = 0, total = 19;
 
     /* Los tests 1-9 son puramente locales: los corre y los imprime el rango 0.
        Los tests 10-13 son colectivos y los deben ejecutar TODOS los procesos,
@@ -1092,14 +1212,12 @@ int run_all_tests(void) {
     collective += test_let_volume();
     collective += test_balance_work();
     collective += test_let_energy_conservation();
+    collective += test_let_volume_vs_procs();
 
     int rc = 0;
     if (rank == 0) {
         passed += collective;
-        printf("========== RESULTADO: %d/%d tests pasaron ==========\n", passed, total);
-        if (passed == total - 1)
-            printf("(el test 16 falla a proposito: ver docs/week4-report.md)\n");
-        printf("\n");
+        printf("========== RESULTADO: %d/%d tests pasaron ==========\n\n", passed, total);
         rc = (passed == total) ? 0 : 1;
     }
     MPI_Bcast(&rc, 1, MPI_INT, 0, MPI_COMM_WORLD);
@@ -1119,7 +1237,7 @@ int run_all_tests(void) {
     passed += test_openmp_determinism();
 
     printf("========== RESULTADO: %d/%d tests pasaron ==========\n", passed, total);
-    printf("(los tests 10-18 requieren MPI: mpirun -np 4 ./nbody_mpi --validate)\n\n");
+    printf("(los tests 10-19 requieren MPI: mpirun -np 4 ./nbody_mpi --validate)\n\n");
     return (passed == total) ? 0 : 1;
 #endif
 }

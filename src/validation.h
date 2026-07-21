@@ -138,17 +138,15 @@ int test_let_exact_theta0(void);
 int test_let_accuracy(void);
 
 /*
- * Test 16 — Volumen del LET.
+ * Test 16 — Volumen del LET: crecimiento de n_ghost con N.
  *
- * Mide cuántos fantasmas importa cada proceso a dos tamaños de problema con el
- * mismo P, y estima cómo crece n_ghost con N. El criterio del plan de la semana
- * era que creciera SUBLINEALMENTE: es lo que separa al LET de la réplica.
+ * Es el criterio que define si la descomposición sirve. Mide el exponente k de
+ * n_ghost ~ N^k con las dos descomposiciones: k = 1 significa que el LET crece
+ * como la réplica y no comprime nada.
  *
- * ESTE TEST FALLA A PROPÓSITO y no hay que "arreglarlo" bajando el umbral. Mide
- * la limitación real encontrada en la semana 4: sobre Plummer los dominios de
- * rangos Morton no son compactos, el AABB del destino cubre buena parte del
- * espacio y la selección casi no resume, con lo que n_ghost crece lineal con N.
- * Ver docs/week4-report.md. Colectivo.
+ * La semana 4 midió k = 0,92 con rangos Morton y este test quedó fallando a
+ * propósito. La semana 5 lo convirtió en criterio de aceptación de ORB.
+ * Colectivo.
  */
 int test_let_volume(void);
 
@@ -172,11 +170,26 @@ int test_balance_work(void);
  */
 int test_let_energy_conservation(void);
 
+/*
+ * Test 19 — Volumen del LET: ORB contra Morton a igual configuración.
+ *
+ * Verifica la afirmación central de la semana 5 en su forma comparativa: a la
+ * misma configuración, dominios compactos importan sustancialmente menos que
+ * tramos de curva. Criterio: ORB < 0,6× Morton (medido: entre 0,38 y 0,54).
+ *
+ * Usa n_local constante (5000 por proceso) y no N constante. Con N fijo, subir P
+ * achica n_local y el cociente fantasmas/locales crece por el denominador y no
+ * por la calidad del reparto — un umbral absoluto sobre ese cociente mide dos
+ * cosas a la vez. El criterio que mide el crecimiento asintótico es el test 16.
+ * Colectivo.
+ */
+int test_let_volume_vs_procs(void);
+
 #endif /* USE_MPI */
 
 /*
  * Ejecuta la suite completa e imprime un resumen. Son 9 tests en la versión
- * secuencial y 18 en la versión MPI (los 9 distribuidos requieren mpirun).
+ * secuencial y 19 en la versión MPI (los 10 distribuidos requieren mpirun).
  * Retorna 0 si todos pasan, 1 si alguno falla (compatible con exit code).
  */
 int run_all_tests(void);

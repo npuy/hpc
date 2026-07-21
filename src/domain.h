@@ -30,12 +30,34 @@
 #include <stdint.h>
 #include "particle.h"
 
+/*
+ * Nodo del árbol ORB (bisección recursiva ortogonal), semana 5.
+ *
+ * Cada nodo cubre una caja del espacio y un tramo contiguo de ranks. Un nodo
+ * interno parte su caja por un plano perpendicular a axis y reparte sus ranks
+ * entre los dos hijos; una hoja (nprocs == 1) es el dominio de un proceso.
+ *
+ * El árbol tiene 2P-1 nodos y está REPLICADO en todos los procesos: son unos
+ * cientos de bytes, así que cada proceso conoce la caja de todos los demás sin
+ * comunicación. Eso es justamente lo que el LET necesita.
+ */
+typedef struct {
+    double min[3], max[3];  /* caja de este nodo */
+    int    first, nprocs;   /* tramo de ranks [first, first+nprocs) */
+    int    axis;            /* eje de corte; -1 si es hoja */
+    double split;           /* coordenada del corte */
+    int    left, right;     /* índices de hijos; -1 si es hoja */
+} OrbNode;
+
 typedef struct {
     int       rank;
     int       nprocs;
     double    gmin[3], gmax[3];  /* bounding box global cúbico (congelado) */
-    uint64_t *splitters;         /* nprocs+1 cortes: el rango de k es
-                                    [splitters[k], splitters[k+1]) */
+    uint64_t *splitters;         /* camino Morton: nprocs+1 cortes, el rango de
+                                    k es [splitters[k], splitters[k+1]) */
+    OrbNode  *orb;               /* camino ORB: 2*nprocs-1 nodos */
+    int       orb_count;         /* nodos usados del árbol ORB */
+    int       use_orb;           /* 1 = propiedad por caja, 0 = por clave Morton */
 } Domain;
 
 /* Reserva el arreglo de splitters y consulta rank/nprocs del comunicador. */
@@ -96,6 +118,56 @@ void domain_partition(Domain *d, const Particle *p, int n_local,
  */
 void domain_partition_ex(Domain *d, const Particle *p, int n_local,
                          int64_t n_global, int use_work, MPI_Comm comm);
+
+/*
+ * Particionamiento ORB: bisección recursiva ortogonal del espacio.
+ *
+ * POR QUÉ EXISTE. La semana 4 midió que el LET no comprime sobre Plummer, y la
+ * causa es que un tramo contiguo de claves Morton NO es una región compacta: el
+ * AABB del dominio de un proceso llegó a cubrir el 44,6% del espacio, con lo que
+ * ningún nodo satisfacía el criterio de exportación y se enviaba todo sin
+ * resumir. El problema de fondo es que en Plummer el pico de densidad cae donde
+ * se tocan los octantes de nivel 1, así que las claves del core se reparten por
+ * todo el espacio de claves y los dominios se interpenetran.
+ *
+ * ORB corta el espacio por planos: cada proceso queda con una CAJA, los dominios
+ * son disjuntos y contiguos, y la caja de un proceso periférico no contiene el
+ * core. Recién ahí el criterio del LET puede aceptar resúmenes.
+ *
+ * ALGORITMO. Recursivo sobre el grupo de procesos: se elige como eje de corte la
+ * dimensión más larga de la caja (evita cajas con forma de lámina, que tienen
+ * mucha superficie y por lo tanto mucho LET), se bisecta la coordenada hasta que
+ * el trabajo quede repartido nL/nprocs, y se recurre en las dos mitades.
+ *
+ * Se bisecta el TRABAJO (Σ work), no el conteo: el campo work de la semana 4 ya
+ * existe y ya está validado, así que ORB hereda el balance por costo sin código
+ * nuevo. Con work global nulo (primer paso) cae al conteo.
+ *
+ * Con P que no es potencia de 2 se parte en nprocs/2 y el resto, con objetivo
+ * proporcional. Colectivo.
+ */
+void domain_partition_orb(Domain *d, const Particle *p, int n_local,
+                          int use_work, MPI_Comm comm);
+
+/*
+ * Proceso dueño de una posición: desciende el árbol ORB comparando pos[axis]
+ * contra el plano de corte. O(log P).
+ *
+ * Usa el mismo predicado (<) que el conteo del particionamiento. Una discrepancia
+ * entre ambos haría que una partícula sobre el plano se contara de un lado y se
+ * enviara al otro, y se perderían partículas.
+ *
+ * No hace test de contención: cualquier posición, aun fuera de la caja global,
+ * obtiene un dueño válido. Es lo que hace seguro el caso de una partícula que se
+ * escapó del box congelado entre reparticiones.
+ */
+int domain_owner_pos(const Domain *d, const double pos[3]);
+
+/*
+ * Caja del dominio del proceso rank. Con ORB cada proceso conoce la de todos los
+ * demás sin comunicación, porque el árbol está replicado.
+ */
+void domain_box(const Domain *d, int rank, double min[3], double max[3]);
 
 /*
  * Proceso dueño de una clave: el mayor k tal que splitters[k] <= key.

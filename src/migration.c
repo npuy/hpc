@@ -26,8 +26,14 @@ int migrate_particles(Particle **p, int n_local, int *capacity,
     int *rdispl  = malloc(P * sizeof(int));
     int *cursor  = malloc(P * sizeof(int));
 
+    /* Con ORB el dueño sale de descender el árbol de cajas por la posición; con
+       Morton, de una búsqueda binaria sobre los splitters. Las claves se siguen
+       calculando en ambos casos: con ORB ya no deciden la propiedad, pero el
+       orden Morton se conserva por localidad de caché (ver morton_sort más
+       abajo). */
     for (int i = 0; i < n_local; i++) {
-        dest[i] = domain_owner(d, (*p)[i].morton);
+        dest[i] = d->use_orb ? domain_owner_pos(d, (*p)[i].pos)
+                             : domain_owner(d, (*p)[i].morton);
         scount[dest[i]]++;
     }
     sdispl[0] = 0;

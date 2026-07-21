@@ -13,11 +13,17 @@ void domain_init(Domain *d, MPI_Comm comm) {
     d->splitters = malloc((d->nprocs + 1) * sizeof(uint64_t));
     d->splitters[0] = 0;
     d->splitters[d->nprocs] = UINT64_MAX;
+
+    d->orb       = malloc((size_t)(2 * d->nprocs) * sizeof(OrbNode));
+    d->orb_count = 0;
+    d->use_orb   = 0;
 }
 
 void domain_free(Domain *d) {
     free(d->splitters);
+    free(d->orb);
     d->splitters = NULL;
+    d->orb = NULL;
 }
 
 void domain_global_bounds(Domain *d, const Particle *p, int n_local, MPI_Comm comm) {
@@ -162,6 +168,149 @@ void domain_partition_ex(Domain *d, const Particle *p, int n_local,
 
     free(lo); free(hi); free(mid); free(target); free(cl); free(cg);
     free(prefix);
+}
+
+/* ------------------------------------------------------------------ */
+/* ORB: biseccion recursiva ortogonal (semana 5)                       */
+/* ------------------------------------------------------------------ */
+
+/* Peso de una particula: su costo medido, o 1 si todavia no se midio. */
+static int64_t weight_of(const Particle *p, int use_work) {
+    return use_work ? p->work : 1;
+}
+
+/*
+ * Construye recursivamente el subarbol que cubre los ranks
+ * [first, first+nprocs) sobre la caja [bmin, bmax].
+ *
+ * idx[0..n_idx) son los indices de las particulas LOCALES que caen en esta caja.
+ * La pertenencia se lleva por el camino recorrido y no por un test geometrico:
+ * asi el conteo de la biseccion y domain_owner_pos usan exactamente el mismo
+ * predicado, que es la condicion para no perder particulas sobre el plano.
+ *
+ * Todos los procesos recorren la misma estructura de recursion, porque depende
+ * solo de valores globales. Es lo que permite usar colectivos aca adentro.
+ */
+static int orb_build(Domain *d, const Particle *p, int *idx, int n_idx,
+                     const double bmin[3], const double bmax[3],
+                     int first, int nprocs, int use_work, MPI_Comm comm) {
+    int self = d->orb_count++;
+    for (int k = 0; k < 3; k++) {
+        d->orb[self].min[k] = bmin[k];
+        d->orb[self].max[k] = bmax[k];
+    }
+    d->orb[self].first  = first;
+    d->orb[self].nprocs = nprocs;
+
+    if (nprocs == 1) {
+        d->orb[self].axis  = -1;
+        d->orb[self].left  = -1;
+        d->orb[self].right = -1;
+        return self;
+    }
+
+    /* Eje = dimension mas larga. Evita cajas con forma de lamina, que tienen
+       mucha superficie y por lo tanto generan mucho LET. */
+    int axis = 0;
+    double ext = bmax[0] - bmin[0];
+    for (int k = 1; k < 3; k++)
+        if (bmax[k] - bmin[k] > ext) { ext = bmax[k] - bmin[k]; axis = k; }
+
+    int64_t w_local = 0;
+    for (int j = 0; j < n_idx; j++) w_local += weight_of(&p[idx[j]], use_work);
+    int64_t w_total;
+    MPI_Allreduce(&w_local, &w_total, 1, MPI_INT64_T, MPI_SUM, comm);
+
+    /* Reparto proporcional: soporta P que no es potencia de 2 sin parches. */
+    int nL = nprocs / 2;
+    int64_t target = (w_total * nL) / nprocs;
+
+    /* Biseccion sobre la coordenada. Corte por numero fijo de iteraciones y no
+       por tolerancia: asi todos los procesos hacen exactamente las mismas
+       llamadas colectivas. 50 iteraciones agotan la precision de un double. */
+    double lo = bmin[axis], hi = bmax[axis], mid = 0.5 * (lo + hi);
+    for (int it = 0; it < 50; it++) {
+        mid = 0.5 * (lo + hi);
+        int64_t below_local = 0;
+        for (int j = 0; j < n_idx; j++)
+            if (p[idx[j]].pos[axis] < mid)
+                below_local += weight_of(&p[idx[j]], use_work);
+        int64_t below;
+        MPI_Allreduce(&below_local, &below, 1, MPI_INT64_T, MPI_SUM, comm);
+
+        if (below < target) lo = mid;
+        else                hi = mid;
+    }
+    double split = 0.5 * (lo + hi);
+
+    d->orb[self].axis  = axis;
+    d->orb[self].split = split;
+
+    /* Particion in-place de idx[] por el mismo predicado (<) que usara
+       domain_owner_pos. Cada nivel cuesta O(n_idx), no O(n_local) por nodo. */
+    int nleft = 0;
+    for (int j = 0; j < n_idx; j++) {
+        if (p[idx[j]].pos[axis] < split) {
+            int tmp = idx[nleft]; idx[nleft] = idx[j]; idx[j] = tmp;
+            nleft++;
+        }
+    }
+
+    double lmax[3], rmin[3];
+    for (int k = 0; k < 3; k++) { lmax[k] = bmax[k]; rmin[k] = bmin[k]; }
+    lmax[axis] = split;
+    rmin[axis] = split;
+
+    int l = orb_build(d, p, idx,          nleft,         bmin, lmax,
+                      first,      nL,           use_work, comm);
+    int r = orb_build(d, p, idx + nleft,  n_idx - nleft, rmin, bmax,
+                      first + nL, nprocs - nL,  use_work, comm);
+
+    d->orb[self].left  = l;
+    d->orb[self].right = r;
+    return self;
+}
+
+void domain_partition_orb(Domain *d, const Particle *p, int n_local,
+                          int use_work, MPI_Comm comm) {
+    d->orb_count = 0;
+    d->use_orb   = 1;
+
+    /* Primer paso: work vale 0 para todas. Caer al reparto por conteo en vez de
+       bisecar un total nulo y dejar todos los cortes pegados a un borde. */
+    if (use_work) {
+        int64_t w = 0, w_global;
+        for (int i = 0; i < n_local; i++) w += p[i].work;
+        MPI_Allreduce(&w, &w_global, 1, MPI_INT64_T, MPI_SUM, comm);
+        if (w_global <= 0) use_work = 0;
+    }
+
+    int *idx = malloc((size_t)(n_local > 0 ? n_local : 1) * sizeof(int));
+    for (int i = 0; i < n_local; i++) idx[i] = i;
+
+    orb_build(d, p, idx, n_local, d->gmin, d->gmax, 0, d->nprocs, use_work, comm);
+
+    free(idx);
+}
+
+int domain_owner_pos(const Domain *d, const double pos[3]) {
+    int i = 0;
+    while (d->orb[i].axis >= 0)
+        i = (pos[d->orb[i].axis] < d->orb[i].split) ? d->orb[i].left
+                                                    : d->orb[i].right;
+    return d->orb[i].first;
+}
+
+void domain_box(const Domain *d, int rank, double min[3], double max[3]) {
+    for (int i = 0; i < d->orb_count; i++) {
+        if (d->orb[i].axis < 0 && d->orb[i].first == rank) {
+            for (int k = 0; k < 3; k++) {
+                min[k] = d->orb[i].min[k];
+                max[k] = d->orb[i].max[k];
+            }
+            return;
+        }
+    }
 }
 
 int domain_owner(const Domain *d, uint64_t key) {
