@@ -6,6 +6,7 @@
 - [Guia de ejecucion en pcunix](docs/pcunix-guia.md) — Estado real del cluster (pcunix40 caida, 2 nucleos fisicos por nodo, home NFS compartido), colocacion de procesos, puesta a punto, que ya se verifico (19/19 con GCC+MPICH), como seria la corrida completa y que mirar
 - [Runbook: ejecutar en pcunix paso a paso](docs/pcunix-runbook.md) — Guia operativa: 10 pasos con comando exacto, salida esperada y que hacer si falla; calibracion antes de lanzar la matriz; corrida por bloques; tabla de problemas conocidos
 - [Configuracion y ejecucion de MPI](docs/mpi-setup.md) — Setup de mpich, compilacion con mpicc, ejecucion con mpirun, fix FI_PROVIDER=tcp, prerequisitos SSH para distribuido
+- [REPORTE FINAL](docs/final-report.md) — Sintesis del proyecto completo, organizada por tema y no por semana: problema, solucion construida (nucleo secuencial, reparto hibrido, ORB, migracion, LET, balance), justificacion de las primitivas MPI y OpenMP usadas, metodologia de validacion (escalera de oraculos, tests bit a bit), los 6 hallazgos, resultados consolidados en pcunix, 8 lecciones metodologicas
 - [Plan general de implementacion](docs/plan.md) — Arquitectura hibrida MPI/OpenMP, Barnes-Hut, etapas, cronograma 4 semanas, MVP, riesgos
 - [Semana 1 — Plan detallado](docs/week1-plan.md) — Version secuencial: particulas, leapfrog KDK, fuerza O(N^2), Morton 3D, validacion, estructura de archivos
 - [Semana 1 — Reporte](docs/week1-report.md) — Resultados: 4/4 tests validacion PASS, rendimiento O(N^2), componentes implementados, criterios de aceptacion
