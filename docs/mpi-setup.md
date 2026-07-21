@@ -1,8 +1,17 @@
 # Configuracion y ejecucion de MPI en maquinas de fing
 
+> **Este documento quedo parcialmente desactualizado.** Ver
+> [pcunix-guia.md](pcunix-guia.md), que tiene el estado verificado en vivo del
+> cluster. Correcciones principales: **pcunix40 esta caida** y pcunix42 tiene
+> conflicto de host key (usar 41, 43, 44, 45); el home es **NFS compartido**, asi
+> que se compila una sola vez y las claves SSH se pueblan solas; cada nodo tiene
+> **2 nucleos fisicos**, de modo que mas de 2 procesos por nodo sobresuscriben.
+
 ## Entorno de ejecucion
 
-Las maquinas de fing (pcunix40, pcunix42, etc.) usan modulos para gestionar herramientas.
+Las maquinas de fing (pcunix41, pcunix43, pcunix44, pcunix45) usan modulos para
+gestionar herramientas. Se accede a traves de `lulu`, que es **solo punto de
+acceso**: no esta previsto ejecutar programas ahi.
 
 ## Configuracion de MPI
 

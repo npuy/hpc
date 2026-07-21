@@ -13,6 +13,13 @@ cumplen:
 
 Suite de validación: **19/19**, verificada con P=2, 3, 4 y 8. Sin fugas.
 
+**Todo esto quedó re-medido en las máquinas pcunix de fing** (5 nodos, núcleos
+homogéneos, ejecución realmente distribuida), lo que salda la deuda que venía
+arrastrándose desde la semana 3. Los resultados se reproducen casi exactamente y
+además se cumplen por primera vez dos criterios que el portátil nunca alcanzó:
+speedup >3× con P=4 y eficiencia débil >60% con P=4. Ver la sección
+"Validación en pcunix".
+
 ## Archivos
 
 ```
@@ -66,13 +73,15 @@ lo que un LET debe costar.
 comportamiento correcto: cada proceso construye sobre su vecindario, no sobre el
 sistema entero.
 
-El repunte en P=8 es casi seguro sobresuscripción del portátil, no algorítmico
-(ver entorno).
+El repunte en P=8 es casi seguro sobresuscripción del portátil, no algorítmico.
+**Confirmado después:** en pcunix, con procesos repartidos en 5 máquinas, el árbol
+con ORB decrece monótonamente al subir P.
 
 **Un efecto lateral honesto:** la fase de fuerzas empeora levemente con ORB
-(2,79 → 3,16 s a P=4). No lo investigué a fondo; la hipótesis más plausible es
-peor localidad de caché, porque el arreglo local queda ordenado por Morton pero
-la propiedad ya no sigue la curva. Vale la pena mirarlo, aunque el total mejora.
+(2,79 → 3,16 s a P=4). La hipótesis era peor localidad de caché, porque el arreglo
+local queda ordenado por Morton pero la propiedad ya no sigue la curva.
+**Desmentido después:** en pcunix la diferencia baja a 2-3%, así que era del banco
+de pruebas y no del algoritmo.
 
 ### Escalabilidad débil (N/P = 25K)
 
@@ -86,8 +95,9 @@ la propiedad ya no sigue la curva. Vale la pena mirarlo, aunque el total mejora.
 El árbol pasa de crecer 46× a crecer 6,5×, una reducción de **7,2×** a P=8. Pero
 **la eficiencia débil sigue siendo mala** (7,6% con ORB contra 6,5% con Morton):
 el árbol dejó de ser el problema y ahora domina la fase de fuerzas, que crece con
-`log N` por construcción y encima se mide sobresuscribiendo la máquina. Este
-número hay que rehacerlo en pcunix antes de sacar conclusiones.
+`log N` por construcción y encima se mide sobresuscribiendo la máquina.
+**Rehecho en pcunix:** con núcleos homogéneos la eficiencia débil sube a 62% con
+P=4 y 33% con P=8.
 
 ### Plummer vs uniform (N=100K, P=4) — la verificación del diagnóstico
 
@@ -191,26 +201,148 @@ del orden.
 `Domain::gmin/gmax` congelado **sigue haciendo falta**, ahora por otra razón:
 `octree_build_box` exige la misma caja raíz en todos los procesos.
 
-## Entorno
+## Validación en pcunix: la deuda de tres semanas, saldada
 
-> Mismo portátil Apple Silicon de las semanas 3 y 4 (4 núcleos performance + 4
-> efficiency). Las filas de P=8 sobresuscriben y usan los núcleos E, que rinden
-> ~21% de un núcleo P. **Las comparaciones ORB vs Morton son válidas** porque las
-> dos ramas corren en las mismas condiciones, pero **los tiempos absolutos y la
-> eficiencia débil no lo son**. La deuda de re-medir en pcunix ya lleva tres
-> semanas.
+Todo lo anterior se midió en un portátil Apple Silicon con núcleos heterogéneos.
+La corrida en el cluster de fing (`docs/resultados-pcunix.txt`, 6 min 40 s)
+cierra esa deuda y cambia el estatus de los resultados: dejan de ser "válidos
+como comparación relativa" y pasan a ser medidos en hardware homogéneo.
+
+**Entorno:** 5 nodos Intel i3-4170 (2 núcleos físicos c/u), GCC 15.2.1, MPICH,
+x86-64. Los barridos van distribuidos a 2 procesos por nodo, así que P=1..8 son
+1 a 8 núcleos físicos **sin sobresuscribir**. Ver [pcunix-guia.md](pcunix-guia.md).
+
+### Portabilidad
+
+**19/19 con P=2, 3, 4 y 8 distribuidos en 5 máquinas**, y 9/9 secuencial. Otro
+compilador, otra implementación de MPI y otra arquitectura dan los mismos
+veredictos, **incluidos los dos tests de igualdad bit a bit** (el 9, determinismo
+de OpenMP, y el 14, LET con θ=0). También queda saldada la corrida multi-máquina
+pendiente desde la semana 3.
+
+### El resultado central se reproduce casi exactamente
+
+Fantasmas por proceso, P=4, y el cociente contra las partículas locales:
+
+| N | morton | ratio | *(portátil)* | orb | ratio | *(portátil)* |
+|---|---|---|---|---|---|---|
+| 12.500 | 8.544 | 2,73 | *2,66* | 4.225 | **1,35** | *1,36* |
+| 25.000 | 17.102 | 2,74 | *2,60* | 6.804 | **1,09** | *1,09* |
+| 50.000 | 28.914 | 2,31 | *2,67* | 10.768 | **0,86** | *0,86* |
+| 100.000 | 58.739 | 2,35 | *2,44* | 16.906 | **0,68** | *0,67* |
+
+**Exponente: k = 0,67 con ORB y k = 0,93 con Morton** (portátil: 0,66 y 0,92).
+La serie de ORB coincide con la del portátil hasta la segunda decimal en los
+cuatro tamaños. El resultado no dependía de la máquina.
+
+### El LET es un efecto de superficie, ahora medido directamente
+
+A **N fijo** (50K) subiendo P, los fantasmas de ORB se mantienen prácticamente
+constantes, que es la firma de un término de superficie:
+
+| P | morton | orb |
+|---|---|---|
+| 2 | 24.995 | 9.038 |
+| 4 | 28.917 | 10.769 |
+| 8 | 29.821 | 9.794 |
+
+El `24.995` de Morton con P=2 es elocuente: N/2 = 25.000, o sea que **cada proceso
+importa exactamente todas las partículas del otro**. Compresión cero, que es el
+hallazgo de la semana 4 reproducido en otro hardware.
+
+A **n_local fijo** subiendo P, ORB crece como P^0,72 y Morton como P^1,10.
+
+### Escalabilidad fuerte (N=50K) — el criterio se cumple
+
+| P | morton | speedup | orb | speedup | eficiencia orb |
+|---|---|---|---|---|---|
+| 1 | 10.142 | 1,00× | 10.118 | 1,00× | 100% |
+| 2 | 5.325 | 1,90× | 5.190 | 1,95× | 97% |
+| 4 | 4.371 | 2,32× | 3.161 | **3,20×** | **80%** |
+| 8 | 4.176 | 2,43× | 2.777 | 3,64× | 46% |
+
+**Es la primera vez en todo el proyecto que se cumple el criterio de >3× con
+P=4.** En el portátil nunca pasó de 2,80×, y ahora se ve que buena parte de eso
+era el hardware.
+
+`tree_time` con ORB **decrece** al subir P (0,093 → 0,056 → 0,041 → 0,034 s),
+que es el comportamiento correcto: cada proceso construye sobre menos partículas.
+Con Morton se queda plano (0,092 → 0,076).
+
+### Escalabilidad débil (N/P = 12,5K)
+
+| P | morton | orb | eficiencia orb |
+|---|---|---|---|
+| 1 | 1.958 | 1.960 | 100% |
+| 2 | 2.343 | 2.294 | 85% |
+| 4 | 4.526 | 3.164 | **62%** |
+| 8 | 8.885 | 5.980 | 33% |
+
+**A P=4 se cumple el criterio de >60%** (en el portátil daba 7,6%). A P=8 cae a
+33%: lo que domina ahí es la fase de fuerzas (3,86 s), que crece más de lo que
+predice `log N` porque los fantasmas también entran al recorrido del árbol.
+
+### OpenMP: exactamente lo previsto
+
+| Hilos | Total | Speedup | Fase fuerzas |
+|---|---|---|---|
+| 1 | 10.119 | 1,00× | 1,00× |
+| 2 | 5.163 | **1,96×** | 2,00× |
+| 4 | 4.236 | 2,39× | 2,43× |
+
+Con 2 núcleos físicos, 2 hilos dan 1,96× (98% de eficiencia) y el hyperthreading
+agrega ~20% más. **Confirma que el 3,94× con 8 hilos de la semana 3 era artefacto
+de los núcleos efficiency**, no un límite del algoritmo.
+
+### Plummer vs uniform
+
+| | morton | orb |
+|---|---|---|
+| plummer | 28.914 | 10.768 |
+| uniform | 12.314 | 5.884 |
+| **brecha** | **2,35×** | **1,83×** |
+
+La brecha de ORB da 1,83×, idéntica a la del portátil.
+
+## Dos resultados que el cluster corrige
+
+### El balance por costo casi no aporta con ORB
+
+| Reparto | Desbal. partículas | Desbal. trabajo | Total |
+|---|---|---|---|
+| count | 1.0014 | 1.1364 | 5.209 |
+| work | 1.0072 | **1.1345** | 5.187 |
+
+Una mejora del **0,17%**, contra el 1,2469 → 1,1245 que daba en el portátil. La
+explicación más plausible es que ORB ya bisecta buscando equilibrio, así que con
+dominios compactos queda poco margen. **El balance por costo se justificaba sobre
+dominios Morton; sobre ORB es casi redundante.** Es un matiz honesto sobre el
+resultado de la semana 4, y conviene decirlo en el informe en vez de presentar la
+mejora del portátil como si fuera general.
+
+### La penalización en fuerzas era del hardware, no del algoritmo
+
+En el portátil la fase de fuerzas empeoraba ~13% con ORB. Acá la diferencia es de
+**2-3%** (P=4: 2,133 vs 2,202 s; P=8: 1,667 vs 1,707 s). La hipótesis de la
+localidad de caché queda muy debilitada.
+
+### Nota sobre el crecimiento del árbol con Morton
+
+En el portátil `tree_time` con Morton crecía 4,8× de P=1 a P=8; acá se mantiene
+plano. La explicación más plausible es que en el portátil los 8 procesos competían
+por el mismo ancho de banda de memoria, mientras que acá están repartidos en 5
+máquinas con su propia memoria. **Es una hipótesis, no una medición**: los dos
+casos usan N y cantidad de pasos distintos y no los comparé de forma controlada.
+No cambia la conclusión —ORB deja el árbol en la mitad y lo hace decrecer con P—
+pero sí sugiere que parte del efecto de la semana 4 era del banco de pruebas.
 
 ## Pendiente
 
-- **Re-medir las semanas 3, 4 y 5 en pcunix.** Sigue siendo la deuda más vieja y
-  la que más compromete el informe final.
-- **Corrida distribuida en varias máquinas** (`-hosts`), arrastrada desde la
-  semana 3.
-- **La fase de fuerzas empeora ~13% con ORB.** Hipótesis: localidad de caché, por
-  ordenar el arreglo por Morton cuando la propiedad ya no sigue la curva. Probar
-  ordenar por la geometría de ORB.
-- **Escalabilidad débil sigue mala** (7,6%). El árbol dejó de ser el cuello de
-  botella; hay que instrumentar qué domina ahora.
+- **La fase de fuerzas domina la escalabilidad débil a P=8.** El árbol y el LET ya
+  no son el cuello de botella; hay que instrumentar cuánto del recorrido se va en
+  los fantasmas.
+- **Sobre `--balance work`:** medir si sigue aportando algo sobre ORB en
+  configuraciones más desbalanceadas, o documentarlo como redundante.
 - **`docs/final-report.md`**.
 
 ## Lectura de las tres semanas
@@ -221,7 +353,7 @@ El arco quedó completo y es lo más valioso del trabajo:
 |---|---|---|
 | **Semana 3** | Domina la comunicación | El `Allgatherv` era el 1,3%; dominaba el árbol replicado |
 | **Semana 4** | El LET reduce el árbol local a N/P | Lo redujo a ~N/2: los dominios Morton no son compactos |
-| **Semana 5** | ORB da dominios compactos y el LET comprime | Confirmado: k de 0,92 a 0,66 |
+| **Semana 5** | ORB da dominios compactos y el LET comprime | Confirmado: k de 0,92 a 0,66, y reproducido en pcunix (0,93 → 0,67) |
 
 Dos veces seguidas la hipótesis razonable estaba equivocada, y las dos veces lo
 que lo mostró fue una medición barata: en la semana 3, el desglose por fase; en la

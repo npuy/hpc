@@ -2,6 +2,9 @@
 
 ## Base de conocimiento
 
+- [Arquitectura general](docs/arquitectura.md) — Como funciona todo: paso de simulacion, las tres ideas (MAC, ORB, LET), mapa de modulos, struct Particle, caminos alternativos por flag, los 19 tests, CLI, resultados por semana
+- [Guia de ejecucion en pcunix](docs/pcunix-guia.md) — Estado real del cluster (pcunix40 caida, 2 nucleos fisicos por nodo, home NFS compartido), colocacion de procesos, puesta a punto, que ya se verifico (19/19 con GCC+MPICH), como seria la corrida completa y que mirar
+- [Runbook: ejecutar en pcunix paso a paso](docs/pcunix-runbook.md) — Guia operativa: 10 pasos con comando exacto, salida esperada y que hacer si falla; calibracion antes de lanzar la matriz; corrida por bloques; tabla de problemas conocidos
 - [Configuracion y ejecucion de MPI](docs/mpi-setup.md) — Setup de mpich, compilacion con mpicc, ejecucion con mpirun, fix FI_PROVIDER=tcp, prerequisitos SSH para distribuido
 - [Plan general de implementacion](docs/plan.md) — Arquitectura hibrida MPI/OpenMP, Barnes-Hut, etapas, cronograma 4 semanas, MVP, riesgos
 - [Semana 1 — Plan detallado](docs/week1-plan.md) — Version secuencial: particulas, leapfrog KDK, fuerza O(N^2), Morton 3D, validacion, estructura de archivos
@@ -14,6 +17,7 @@
 - [Semana 4 — Reporte](docs/week4-report.md) — Resultados: 17/18 tests, LET correcto (theta=0 bit a bit) pero NO comprime (n_ghost ~ N^0.92, lineal). Causa medida: un tramo Morton contiguo no es una region compacta, el AABB del destino cubre 44.6% del dominio. Balance por costo si cumple (desbalance de trabajo 1.21 -> 1.00). Arreglo pendiente: ORB
 - [Semana 5 — Plan detallado](docs/week5-plan.md) — ORB (biseccion recursiva ortogonal) para que los dominios sean cajas y el LET comprima: arbol ORB replicado, migracion por posicion en vez de por clave, Morton degradado a localidad de cache, harness de medicion GO/NO-GO el dia 1, test 16 pasa a ser criterio de aceptacion (k<0.9), tests 12 reescrito y 19 nuevo
 - [Semana 5 — Reporte](docs/week5-report.md) — ORB implementado: los dos criterios que fallaban ahora se cumplen (n_ghost ~ N^0.66 vs 0.92; tree_time crece 1.6x vs 4.8x). 19/19 tests con P=2,3,4,8. let.c no necesito cambios. Brecha Plummer/uniform de 2.77x a 1.83x, que confirma el diagnostico de la semana 4
+- [Resultados medidos en pcunix](docs/resultados-pcunix.txt) — Salida cruda de la corrida completa (8 bloques, 6m40s, 5 nodos i3-4170): 19/19 con P=2,3,4,8 distribuidos; n_ghost k=0.67 orb vs 0.93 morton; speedup 3.20x con P=4
 - [Spec: orb](docs/specs/orb.md) — Arbol ORB replicado, eje por dimension mas larga, biseccion del trabajo, pertenencia por camino recorrido y no por geometria, Morton degradado a localidad de cache
 - [Spec: let](docs/specs/let.md) — Caja raiz compartida, MAC conservador por distancia minima a la caja destino, fantasmas como pseudo-particulas, orden de fases, limitacion conocida
 - [Spec: balance](docs/specs/balance.md) — Campo work medido en el traversal, biseccion ponderada por prefijo, caso del primer paso, inversion esperada de los desbalances
