@@ -108,7 +108,8 @@ static void octree_insert(Octree *t, int idx, const Particle *p, int i, int dept
     octree_insert(t, t->nodes[idx].children[oi], p, i, depth + 1);
 }
 
-Octree *octree_build(const Particle *p, int n) {
+Octree *octree_build_box(const Particle *p, int n,
+                         const double min[3], const double max[3]) {
     Octree *t = malloc(sizeof(Octree));
     t->capacity = INIT_CAPACITY;
     t->nodes = malloc(t->capacity * sizeof(OctreeNode));
@@ -117,13 +118,32 @@ Octree *octree_build(const Particle *p, int n) {
     for (int i = 0; i < n; i++) t->next[i] = -1;
 
     t->root = alloc_node(t);
-    octree_bounds(p, n, t->nodes[t->root].min, t->nodes[t->root].max);
-    t->size = t->nodes[t->root].max[0] - t->nodes[t->root].min[0];
+    VEC3_COPY(t->nodes[t->root].min, min);
+    VEC3_COPY(t->nodes[t->root].max, max);
+    t->size = max[0] - min[0];
 
     for (int i = 0; i < n; i++)
         octree_insert(t, t->root, p, i, 0);
 
     return t;
+}
+
+Octree *octree_build(const Particle *p, int n) {
+    double mn[3], mx[3];
+    octree_bounds(p, n, mn, mx);
+    return octree_build_box(p, n, mn, mx);
+}
+
+void octree_insert_particles(Octree *t, const Particle *p, int n_old, int n_new) {
+    if (n_new <= n_old) return;
+
+    /* next[] está indexado por índice de partícula: hay que agrandarlo. realloc
+       preserva las cadenas ya armadas para las primeras n_old. */
+    t->next = realloc(t->next, n_new * sizeof(int));
+    for (int i = n_old; i < n_new; i++) t->next[i] = -1;
+
+    for (int i = n_old; i < n_new; i++)
+        octree_insert(t, t->root, p, i, 0);
 }
 
 /* Post-orden: acumula masa y centro de masa desde las hojas hacia la raíz. */

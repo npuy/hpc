@@ -23,8 +23,8 @@ HDR = src/vec3.h src/particle.h src/force.h src/leapfrog.h src/morton.h \
       src/octree.h src/barnes_hut.h src/validation.h
 
 # Modulos que solo existen en la version MPI (semana 3).
-MPI_SRC = src/mpi_types.c src/domain.c src/migration.c src/metrics.c
-MPI_HDR = src/mpi_types.h src/domain.h src/migration.h src/metrics.h
+MPI_SRC = src/mpi_types.c src/domain.c src/migration.c src/metrics.c src/let.c
+MPI_HDR = src/mpi_types.h src/domain.h src/migration.h src/metrics.h src/let.h
 
 .PHONY: all clean
 

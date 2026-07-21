@@ -22,6 +22,7 @@
 #include "domain.h"
 #include "migration.h"
 #include "metrics.h"
+#include "let.h"
 #endif
 
 /* Parámetros de una corrida, comunes a la ruta secuencial y a la híbrida. */
@@ -38,6 +39,9 @@ typedef struct {
     int      snapshot_interval;
     int      rebalance_every;
     int      show_metrics;
+    int      use_let;       /* 1 = LET (etapa 8), 0 = replica global (semana 3) */
+    int      balance_work;  /* 1 = reparto por costo, 0 = por conteo */
+    double   theta_let;     /* theta del criterio de exportacion; <0 = usar theta */
 } Config;
 
 static void print_usage(const char *prog) {
@@ -52,6 +56,9 @@ static void print_usage(const char *prog) {
     printf("  --theta T     Angulo de apertura Barnes-Hut (default: 0.5)\n");
     printf("  --threads T   Hilos OpenMP (default: OMP_NUM_THREADS)\n");
     printf("  --rebalance-every K  Reparticion cada K pasos, solo MPI (default: 20)\n");
+    printf("  --exchange E  Intercambio: let|replicate, solo MPI (default: let)\n");
+    printf("  --balance B   Reparto: work|count, solo MPI (default: work)\n");
+    printf("  --theta-let T Theta del criterio de exportacion LET (default: =theta)\n");
     printf("  --metrics     Desglose de tiempo por fase, solo MPI\n");
     printf("  --validate    Correr suite de validacion\n");
     printf("  --seed SEED   Semilla aleatoria (default: 42)\n");
@@ -201,12 +208,79 @@ static int run_sequential(const Config *c) {
  * splitters solo tienen sentido sobre el espacio de claves que las produjo.
  */
 static void repartition(Domain *d, Particle *local, int n_local,
-                        int64_t n_global, MPI_Comm comm) {
+                        int64_t n_global, int use_work, MPI_Comm comm) {
     domain_global_bounds(d, local, n_local, comm);
     double gmin[3], gmax[3];
     for (int k = 0; k < 3; k++) { gmin[k] = d->gmin[k]; gmax[k] = d->gmax[k]; }
     morton_sort(local, n_local, gmin, gmax);
-    domain_partition(d, local, n_local, n_global, comm);
+    domain_partition_ex(d, local, n_local, n_global, use_work, comm);
+}
+
+/*
+ * Arma el arbol sobre el que se calculan las fuerzas del paso y devuelve
+ * cuantas particulas contiene. Encapsula la diferencia entre los dos esquemas
+ * de intercambio para que el bucle temporal no se bifurque:
+ *
+ *  - LET: el arbol se construye sobre las n_local locales con la caja global
+ *    compartida, se exportan/importan los nodos esenciales y los fantasmas se
+ *    insertan en ese mismo arbol (sin reconstruirlo). Las locales quedan en
+ *    [0, n_local) y las fuerzas se calculan sobre ese rango.
+ *
+ *  - Replicacion: el arbol se construye sobre las N globales y las locales
+ *    quedan en [offset, offset + n_local). Es el camino de la semana 3, que se
+ *    conserva porque es el oraculo de los tests 15-16 y la linea base de todos
+ *    los graficos comparativos del informe.
+ *
+ * Escribe en *base el arreglo sobre el que quedo armado el arbol y en *i0 el
+ * indice donde empiezan las particulas locales dentro de el.
+ */
+static Octree *build_step_tree(Particle **local, int n_local, int *capacity,
+                               Domain *d, const Config *c, MPI_Datatype ptype,
+                               Particle *all, int N, Metrics *m,
+                               Particle **base, int *i0, int *n_tree,
+                               MPI_Comm comm) {
+    double tmark;
+    double theta_let = (c->theta_let >= 0.0) ? c->theta_let : c->theta;
+
+    if (!c->use_let) {
+        tmark = metrics_now();
+        int offset;
+        replicate_particles(*local, n_local, all, N, &offset, ptype, comm);
+        m->comm_time += metrics_now() - tmark;
+
+        tmark = metrics_now();
+        Octree *t = octree_build(all, N);
+        octree_compute_mass(t, all);
+        m->tree_time += metrics_now() - tmark;
+
+        *base = all; *i0 = offset; *n_tree = N;
+        return t;
+    }
+
+    /* El arbol local se necesita completo (con masas y centros de masa) ANTES
+       de exportar: el criterio de apertura conservador los usa. */
+    tmark = metrics_now();
+    Octree *t = octree_build_box(*local, n_local, d->gmin, d->gmax);
+    octree_compute_mass(t, *local);
+    m->tree_time += metrics_now() - tmark;
+
+    tmark = metrics_now();
+    int n_ghost = let_exchange(local, n_local, capacity, t, d,
+                               theta_let, c->softening, ptype, comm);
+    m->let_time += metrics_now() - tmark;
+    m->ghost_sum += n_ghost;
+
+    /* Insertar los fantasmas en el arbol ya construido en vez de rearmar uno
+       fusionado: la caja raiz es la misma, asi que la estructura sigue valida y
+       solo se subdividen las hojas donde caen los nuevos puntos. Las masas si
+       hay que recalcularlas. */
+    tmark = metrics_now();
+    octree_insert_particles(t, *local, n_local, n_local + n_ghost);
+    octree_compute_mass(t, *local);
+    m->tree_time += metrics_now() - tmark;
+
+    *base = *local; *i0 = 0; *n_tree = n_local + n_ghost;
+    return t;
 }
 
 static int run_mpi(const Config *c) {
@@ -237,6 +311,10 @@ static int run_mpi(const Config *c) {
 #ifdef _OPENMP
         printf("  Hilos OpenMP por proceso: %d\n", omp_get_max_threads());
 #endif
+        printf("  Intercambio: %s\n", c->use_let ? "LET" : "replicacion global");
+        if (c->use_let && c->theta_let >= 0.0)
+            printf("  Theta de exportacion LET: %g\n", c->theta_let);
+        printf("  Reparto: por %s\n", c->balance_work ? "costo (work)" : "conteo");
         printf("  Reparticion cada %d pasos\n\n", c->rebalance_every);
     }
 
@@ -258,27 +336,31 @@ static int run_mpi(const Config *c) {
     /* Descomposicion espacial: cada proceso queda con un tramo Morton contiguo. */
     Domain d;
     domain_init(&d, comm);
-    repartition(&d, local, n_local, N, comm);
+    repartition(&d, local, n_local, N, 0, comm);
     n_local = migrate_particles(&local, n_local, &capacity, &d, ptype, comm);
 
     int64_t id_sum0, id_sum20;
     particle_checksum(local, n_local, &id_sum0, &id_sum20, comm);
 
-    /* Buffer de replicacion: O(N) por proceso. Es el costo de no tener LET. */
-    Particle *all = malloc(N * sizeof(Particle));
-    int offset = 0;
+    /* Buffer de replicacion: O(N) por proceso, el costo de no tener LET. En
+       modo LET no se reserva — el ahorro de memoria es parte del punto. */
+    Particle *all = c->use_let ? NULL : malloc(N * sizeof(Particle));
+
+    Metrics m;
+    metrics_reset(&m);
 
     /* Fuerzas y energia iniciales. */
-    replicate_particles(local, n_local, all, N, &offset, ptype, comm);
-    Octree *tree = octree_build(all, N);
-    octree_compute_mass(tree, all);
-    compute_forces_bh_range(tree, all, N, offset, offset + n_local,
+    Particle *base; int i0, n_tree;
+    Octree *tree = build_step_tree(&local, n_local, &capacity, &d, c, ptype,
+                                   all, N, &m, &base, &i0, &n_tree, comm);
+    compute_forces_bh_range(tree, base, n_tree, i0, i0 + n_local,
                             c->theta, c->softening);
-    for (int i = 0; i < n_local; i++) VEC3_COPY(local[i].acc, all[offset+i].acc);
+    if (!c->use_let)
+        for (int i = 0; i < n_local; i++) VEC3_COPY(local[i].acc, base[i0+i].acc);
 
     double e_local[2] = {
         kinetic_energy_range(local, n_local, 0, n_local),
-        potential_energy_bh_range(tree, all, N, offset, offset + n_local,
+        potential_energy_bh_range(tree, base, n_tree, i0, i0 + n_local,
                                   c->theta, c->softening)
     };
     octree_free(tree);
@@ -287,7 +369,6 @@ static int run_mpi(const Config *c) {
     double E0 = e_global[0] + e_global[1];
     if (rank == 0) printf("Energia inicial E0 = %.10e\n", E0);
 
-    Metrics m;
     metrics_reset(&m);
     MPI_Barrier(comm);
     double t_start = metrics_now();
@@ -308,30 +389,25 @@ static int run_mpi(const Config *c) {
            Migrar al final del paso romperia la contiguidad de [offset, offset+n). */
         tmark = metrics_now();
         if (c->rebalance_every > 0 && step % c->rebalance_every == 0)
-            repartition(&d, local, n_local, N, comm);
+            repartition(&d, local, n_local, N, c->balance_work, comm);
         n_local = migrate_particles(&local, n_local, &capacity, &d, ptype, comm);
         m.migrate_time += metrics_now() - tmark;
 
-        tmark = metrics_now();
-        replicate_particles(local, n_local, all, N, &offset, ptype, comm);
-        m.comm_time += metrics_now() - tmark;
+        tree = build_step_tree(&local, n_local, &capacity, &d, c, ptype,
+                               all, N, &m, &base, &i0, &n_tree, comm);
 
         tmark = metrics_now();
-        tree = octree_build(all, N);
-        octree_compute_mass(tree, all);
-        m.tree_time += metrics_now() - tmark;
-
-        tmark = metrics_now();
-        compute_forces_bh_range(tree, all, N, offset, offset + n_local,
+        compute_forces_bh_range(tree, base, n_tree, i0, i0 + n_local,
                                 c->theta, c->softening);
         m.force_time += metrics_now() - tmark;
 
-        for (int i = 0; i < n_local; i++) VEC3_COPY(local[i].acc, all[offset+i].acc);
+        if (!c->use_let)
+            for (int i = 0; i < n_local; i++) VEC3_COPY(local[i].acc, base[i0+i].acc);
 
         double E = 0.0;
         if (is_snapshot) {
             e_local[0] = kinetic_energy_range(local, n_local, 0, n_local);
-            e_local[1] = potential_energy_bh_range(tree, all, N, offset, offset + n_local,
+            e_local[1] = potential_energy_bh_range(tree, base, n_tree, i0, i0 + n_local,
                                                    c->theta, c->softening);
             MPI_Allreduce(e_local, e_global, 2, MPI_DOUBLE, MPI_SUM, comm);
             E = e_global[0] + e_global[1];
@@ -354,12 +430,15 @@ static int run_mpi(const Config *c) {
     m.steps = step;
 
     /* Energia final */
-    replicate_particles(local, n_local, all, N, &offset, ptype, comm);
-    tree = octree_build(all, N);
-    octree_compute_mass(tree, all);
+    Metrics discard;
+    metrics_reset(&discard);
+    tree = build_step_tree(&local, n_local, &capacity, &d, c, ptype,
+                           all, N, &discard, &base, &i0, &n_tree, comm);
     e_local[0] = kinetic_energy_range(local, n_local, 0, n_local);
-    e_local[1] = potential_energy_bh_range(tree, all, N, offset, offset + n_local,
+    e_local[1] = potential_energy_bh_range(tree, base, n_tree, i0, i0 + n_local,
                                            c->theta, c->softening);
+    double mass_err = c->use_let
+        ? let_mass_error(local, n_local, n_tree - n_local, comm) : 0.0;
     octree_free(tree);
     MPI_Allreduce(e_local, e_global, 2, MPI_DOUBLE, MPI_SUM, comm);
     Ef = e_global[0] + e_global[1];
@@ -382,15 +461,29 @@ static int run_mpi(const Config *c) {
                n_total == N ? "conservadas" : "PERDIDAS");
         printf("  Checksum id: %s\n",
                (id_sum == id_sum0 && id_sum2 == id_sum20) ? "OK" : "ALTERADO");
+        /* El LET resume pero no descarta: cada proceso debe "ver" la masa total
+           del sistema entre sus locales y sus fantasmas. Es la verificacion mas
+           barata de que la seleccion no se comio nada. */
+        if (c->use_let)
+            printf("  Error de masa del LET: %.3e\n", mass_err);
     }
 
     if (c->show_metrics) metrics_report(&m, comm);
 
-    if (c->output && rank == 0) {
-        char fname[256];
-        snprintf(fname, sizeof(fname), "%s_final.csv", c->output);
-        write_particles_csv(fname, all, N, c->t_end);
-        printf("  Snapshot final: %s\n", fname);
+    if (c->output) {
+        /* La salida CSV necesita el estado global reunido en un proceso. En modo
+           LET no hay buffer replicado durante la simulacion, asi que se arma uno
+           solo para esto. */
+        Particle *out = all ? all : malloc((size_t)N * sizeof(Particle));
+        int off;
+        replicate_particles(local, n_local, out, N, &off, ptype, comm);
+        if (rank == 0) {
+            char fname[256];
+            snprintf(fname, sizeof(fname), "%s_final.csv", c->output);
+            write_particles_csv(fname, out, N, c->t_end);
+            printf("  Snapshot final: %s\n", fname);
+        }
+        if (!all) free(out);
     }
 
     free(all);
@@ -409,7 +502,7 @@ int main(int argc, char *argv[]) {
         .N = 1000, .dt = 0.001, .t_end = 1.0, .softening = 0.01,
         .output = NULL, .init_type = "plummer", .use_bh = 1, .theta = 0.5,
         .seed = 42, .snapshot_interval = 100, .rebalance_every = 20,
-        .show_metrics = 0
+        .show_metrics = 0, .use_let = 1, .balance_work = 1, .theta_let = -1.0
     };
     int validate = 0;
     int threads = 0;
@@ -436,6 +529,12 @@ int main(int argc, char *argv[]) {
             threads = atoi(argv[++i]);
         else if (strcmp(argv[i], "--rebalance-every") == 0 && i+1 < argc)
             c.rebalance_every = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--exchange") == 0 && i+1 < argc)
+            c.use_let = (strcmp(argv[++i], "replicate") != 0);
+        else if (strcmp(argv[i], "--balance") == 0 && i+1 < argc)
+            c.balance_work = (strcmp(argv[++i], "count") != 0);
+        else if (strcmp(argv[i], "--theta-let") == 0 && i+1 < argc)
+            c.theta_let = atof(argv[++i]);
         else if (strcmp(argv[i], "--metrics") == 0)
             c.show_metrics = 1;
         else if (strcmp(argv[i], "--validate") == 0)

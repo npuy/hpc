@@ -59,6 +59,43 @@ void octree_bounds(const Particle *p, int n, double min[3], double max[3]);
 Octree *octree_build(const Particle *p, int n);
 
 /*
+ * Igual que octree_build pero con el cubo raíz dado EXPLÍCITAMENTE en vez de
+ * derivarlo de las partículas recibidas.
+ *
+ * Es la variante que exige el LET. octree_build calcula el cubo a partir de las
+ * partículas que le pasan: con replicación todos los procesos pasaban el mismo
+ * arreglo global y obtenían el mismo cubo, pero con LET cada proceso construye
+ * sobre sus N/P locales y obtendría un cubo distinto. Las celdas no alinearían
+ * entre procesos y las aproximaciones importadas no serían comparables con las
+ * locales. Todos los procesos deben pasar el mismo cubo (Domain::gmin/gmax).
+ *
+ * Precondición: las partículas deberían caer dentro del cubo. Una que se salga
+ * no rompe la estructura (siempre hay un octante y la recursión termina en
+ * MAX_DEPTH), pero queda en una celda que no la contiene, y entonces el lado s
+ * del nodo subestima la extensión real de su contenido y el criterio de
+ * apertura puede quedarse corto. Es el mismo supuesto que ya hace morton_encode
+ * al acotar, y lo que lo mantiene válido es repartir cada K pasos.
+ */
+Octree *octree_build_box(const Particle *p, int n,
+                         const double min[3], const double max[3]);
+
+/*
+ * Inserta en un árbol ya construido las partículas p[n_old..n_new), donde p es
+ * el arreglo extendido (las primeras n_old deben ser las mismas y estar en el
+ * mismo orden con que se construyó t).
+ *
+ * Existe para el LET: permite agregar los fantasmas importados al árbol local
+ * en vez de reconstruir un árbol fusionado desde cero. La caja raíz no cambia,
+ * así que la estructura ya calculada sigue siendo válida y solo se subdividen
+ * las hojas donde caen los nuevos puntos. Ahorra una construcción completa por
+ * paso, que es justamente la fase que la semana 4 busca abaratar.
+ *
+ * Hay que volver a llamar a octree_compute_mass después: las masas y centros de
+ * masa del árbol quedan desactualizados al agregar puntos.
+ */
+void octree_insert_particles(Octree *t, const Particle *p, int n_old, int n_new);
+
+/*
  * Recorre el árbol en post-orden llenando mass y cm de cada nodo: las hojas
  * agregan sus partículas y los nodos internos combinan la masa y el centro de
  * masa ponderado de sus hijos. Debe llamarse tras octree_build y antes de

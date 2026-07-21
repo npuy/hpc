@@ -70,6 +70,34 @@ void domain_partition(Domain *d, const Particle *p, int n_local,
                       int64_t n_global, MPI_Comm comm);
 
 /*
+ * Igual que domain_partition, pero si use_work != 0 reparte el TRABAJO
+ * (Σ p[i].work) en lugar del conteo de partículas.
+ *
+ * La semana 3 midió que el desbalance de trabajo (1.1149) es bastante mayor que
+ * el de partículas (1.0000): domain_partition reparte los conteos casi
+ * perfectamente, pero el costo del recorrido no es uniforme y el proceso que
+ * recibe la zona densa termina haciendo 11% más trabajo que el promedio. Con
+ * pesos se reparte lo que realmente cuesta.
+ *
+ * El algoritmo no cambia — es la misma bisección simultánea, con la misma
+ * cantidad de colectivos — solo cambia la magnitud que se acumula: en vez de
+ * "cuántas partículas hay debajo de esta clave", "cuánto trabajo hay debajo de
+ * esta clave". Como el arreglo local ya está ordenado por clave, alcanza con un
+ * prefijo de work calculado una vez por llamada.
+ *
+ * El peso está retrasado un paso (es el costo medido en el paso anterior), lo
+ * que es válido porque la distribución cambia poco entre pasos consecutivos. En
+ * el primer paso work vale 0 para todas: se detecta que el trabajo global es
+ * nulo y se cae al reparto por conteo.
+ *
+ * Efecto esperado y contraintuitivo: el desbalance de PARTÍCULAS empeora (los
+ * procesos con zonas densas reciben menos partículas). Es la señal de que
+ * funciona, no un problema; la métrica de éxito es el desbalance de force_time.
+ */
+void domain_partition_ex(Domain *d, const Particle *p, int n_local,
+                         int64_t n_global, int use_work, MPI_Comm comm);
+
+/*
  * Proceso dueño de una clave: el mayor k tal que splitters[k] <= key.
  * Búsqueda binaria sobre los splitters, O(log P).
  */

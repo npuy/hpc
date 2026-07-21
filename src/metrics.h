@@ -24,10 +24,12 @@ typedef struct {
     double  tree_time;       /* octree_build + octree_compute_mass */
     double  force_time;      /* recorrido Barnes-Hut */
     double  integrate_time;  /* kick + drift */
-    double  comm_time;       /* replicate_particles (Allgatherv) */
+    double  comm_time;       /* replicate_particles (Allgatherv), modo replicate */
+    double  let_time;        /* selección y empaquetado del LET, modo let */
     double  migrate_time;    /* migrate_particles (Alltoallv + reordenamiento) */
     double  total_time;      /* pared, del bucle completo */
     int64_t n_local;         /* partículas locales al final (para el desbalance) */
+    int64_t ghost_sum;       /* Σ fantasmas importados sobre todos los pasos */
     int64_t steps;
 } Metrics;
 

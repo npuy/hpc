@@ -110,11 +110,73 @@ int test_mpi_partition_validity(void);
  */
 int test_mpi_forces_vs_sequential(void);
 
+/*
+ * Test 14 — LET con theta = 0 contra Barnes-Hut secuencial con theta = 0.
+ *
+ * Es el test fuerte del LET, y el que reemplaza al 13 como garantía de que no
+ * falta ninguna interacción. Con theta = 0 el criterio de exportación no acepta
+ * ningún resumen, así que el LET degenera en réplica completa y el árbol
+ * fusionado tiene exactamente la misma estructura, el mismo recorrido y el
+ * mismo orden de sumas que el secuencial. Criterio: igualdad BIT A BIT.
+ *
+ * Cualquier nodo que la selección se saltee aparece acá como una diferencia,
+ * por chica que sea. Colectivo.
+ */
+int test_let_exact_theta0(void);
+
+/*
+ * Test 15 — Precisión del LET a theta = 0.5.
+ *
+ * Con theta > 0 se pierde la exactitud bit a bit y es correcto que así sea: un
+ * fantasma llega como punto de masa en cm y al reinsertarlo puede quedar
+ * agrupado con otros bajo un ancestro que a su vez satisface el MAC, o sea que
+ * se aproxima dos veces. Este test acota ese error por dos vías: contra el
+ * Barnes-Hut secuencial (< 1e-3) y contra el método directo O(N²), exigiendo
+ * que el LET no sea más de 1,5× peor que el propio Barnes-Hut secuencial.
+ * Colectivo.
+ */
+int test_let_accuracy(void);
+
+/*
+ * Test 16 — Volumen del LET.
+ *
+ * Mide cuántos fantasmas importa cada proceso a dos tamaños de problema con el
+ * mismo P, y estima cómo crece n_ghost con N. El criterio del plan de la semana
+ * era que creciera SUBLINEALMENTE: es lo que separa al LET de la réplica.
+ *
+ * ESTE TEST FALLA A PROPÓSITO y no hay que "arreglarlo" bajando el umbral. Mide
+ * la limitación real encontrada en la semana 4: sobre Plummer los dominios de
+ * rangos Morton no son compactos, el AABB del destino cubre buena parte del
+ * espacio y la selección casi no resume, con lo que n_ghost crece lineal con N.
+ * Ver docs/week4-report.md. Colectivo.
+ */
+int test_let_volume(void);
+
+/*
+ * Test 17 — El rebalanceo por costo reduce el desbalance de trabajo.
+ *
+ * Corre la misma simulación repartiendo por conteo y repartiendo por costo, y
+ * compara el desbalance max/avg del trabajo real (Σ work por proceso, que es
+ * determinista, a diferencia de los tiempos). Criterio: el reparto por costo
+ * baja el desbalance por debajo de 1,05, partiendo de 1,11 medido en la semana
+ * 3 con reparto por conteo. Colectivo.
+ */
+int test_balance_work(void);
+
+/*
+ * Test 18 — Conservación de energía con LET.
+ *
+ * Un LET al que le falten interacciones se delata acá aunque el test 15 pase
+ * raspando: el error se acumula paso a paso y la energía deriva. Criterio:
+ * drift < 1% tras 200 pasos. Colectivo.
+ */
+int test_let_energy_conservation(void);
+
 #endif /* USE_MPI */
 
 /*
  * Ejecuta la suite completa e imprime un resumen. Son 9 tests en la versión
- * secuencial y 13 en la versión MPI (los 4 distribuidos requieren mpirun).
+ * secuencial y 18 en la versión MPI (los 9 distribuidos requieren mpirun).
  * Retorna 0 si todos pasan, 1 si alguno falla (compatible con exit code).
  */
 int run_all_tests(void);

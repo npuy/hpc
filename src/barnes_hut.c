@@ -7,9 +7,16 @@
  * partícula i. eps2 = softening². theta2 = theta² (para comparar sin raíces).
  * El árbol es inmutable durante el cálculo, por lo que cachear el puntero al
  * nodo es seguro (no hay realloc).
+ *
+ * *work cuenta las interacciones evaluadas (partículas de hoja + nodos
+ * aceptados). Es la medida de costo que alimenta el rebalanceo ponderado: un
+ * incremento por interacción es despreciable frente al sqrt que ya hay en cada
+ * una, y refleja el costo real mucho mejor que el conteo de partículas, porque
+ * una partícula en zona densa abre muchos más nodos que una en la periferia.
  */
 static void accumulate_force(const Octree *t, int idx, int i, const Particle *p,
-                             double theta2, double eps2, double acc[3]) {
+                             double theta2, double eps2, double acc[3],
+                             int64_t *work) {
     const OctreeNode *nd = &t->nodes[idx];
     if (nd->mass == 0.0) return;   /* celda vacía */
 
@@ -26,6 +33,7 @@ static void accumulate_force(const Octree *t, int idx, int i, const Particle *p,
             acc[0] += f * r[0];
             acc[1] += f * r[1];
             acc[2] += f * r[2];
+            (*work)++;
         }
         return;
     }
@@ -43,11 +51,12 @@ static void accumulate_force(const Octree *t, int idx, int i, const Particle *p,
         acc[0] += f * r[0];
         acc[1] += f * r[1];
         acc[2] += f * r[2];
+        (*work)++;
     } else {
         for (int ch = 0; ch < 8; ch++) {
             int c = nd->children[ch];
             if (c != -1)
-                accumulate_force(t, c, i, p, theta2, eps2, acc);
+                accumulate_force(t, c, i, p, theta2, eps2, acc, work);
         }
     }
 }
@@ -71,8 +80,10 @@ void compute_forces_bh_range(const Octree *t, Particle *p, int n,
     #pragma omp parallel for schedule(dynamic, 64)
     for (int i = i0; i < i1; i++) {
         double acc[3] = {0, 0, 0};
-        accumulate_force(t, t->root, i, p, theta2, eps2, acc);
+        int64_t work = 0;
+        accumulate_force(t, t->root, i, p, theta2, eps2, acc, &work);
         VEC3_COPY(p[i].acc, acc);
+        p[i].work = work;
     }
 }
 

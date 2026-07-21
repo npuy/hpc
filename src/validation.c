@@ -20,6 +20,7 @@
 #include "mpi_types.h"
 #include "domain.h"
 #include "migration.h"
+#include "let.h"
 #endif
 
 int test_two_body_orbit(void) {
@@ -684,6 +685,377 @@ int test_mpi_forces_vs_sequential(void) {
     return pass;
 }
 
+/* ------------------------------------------------------------------ */
+/* Semana 4: LET y balance dinamico                                    */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Calculo de fuerzas por LET: arbol local sobre la caja global compartida,
+ * intercambio de nodos esenciales, fantasmas insertados en ese mismo arbol y
+ * fuerzas solo para el rango local [0, n_local). Devuelve n_ghost.
+ */
+static int let_forces(Particle **local, int n_local, int *capacity,
+                      const Domain *d, MPI_Datatype ptype,
+                      double theta, double softening, MPI_Comm comm) {
+    Octree *t = octree_build_box(*local, n_local, d->gmin, d->gmax);
+    octree_compute_mass(t, *local);
+
+    int n_ghost = let_exchange(local, n_local, capacity, t, d,
+                               theta, softening, ptype, comm);
+
+    octree_insert_particles(t, *local, n_local, n_local + n_ghost);
+    octree_compute_mass(t, *local);
+    compute_forces_bh_range(t, *local, n_local + n_ghost, 0, n_local,
+                            theta, softening);
+    octree_free(t);
+    return n_ghost;
+}
+
+/* Un paso completo del bucle hibrido usando LET en lugar de replicacion. */
+static int distributed_step_let(Particle **local, int n_local, int *capacity,
+                                Domain *d, MPI_Datatype ptype, int N,
+                                double dt, double theta, double softening,
+                                int use_work, int repartition, MPI_Comm comm) {
+    leapfrog_kick(*local, n_local, dt / 2.0);
+    leapfrog_drift(*local, n_local, dt);
+
+    if (repartition) {
+        domain_global_bounds(d, *local, n_local, comm);
+        double gmin[3], gmax[3];
+        for (int k = 0; k < 3; k++) { gmin[k] = d->gmin[k]; gmax[k] = d->gmax[k]; }
+        morton_sort(*local, n_local, gmin, gmax);
+        domain_partition_ex(d, *local, n_local, N, use_work, comm);
+    }
+    n_local = migrate_particles(local, n_local, capacity, d, ptype, comm);
+
+    let_forces(local, n_local, capacity, d, ptype, theta, softening, comm);
+    leapfrog_kick(*local, n_local, dt / 2.0);
+    return n_local;
+}
+
+/*
+ * Error relativo maximo de acc entre el arreglo global reunido y una referencia,
+ * emparejando por id porque la migracion permuta las particulas.
+ */
+static double accel_error_by_id(const Particle *all, const Particle *ref,
+                                const int *pos_of_id, int n) {
+    double max_err = 0.0;
+    for (int i = 0; i < n; i++) {
+        const Particle *r = &ref[pos_of_id[all[i].id]];
+        double diff[3];
+        VEC3_SUB(diff, all[i].acc, r->acc);
+        double den = VEC3_NORM(r->acc);
+        if (den > 0.0) {
+            double err = VEC3_NORM(diff) / den;
+            if (err > max_err) max_err = err;
+        }
+    }
+    return max_err;
+}
+
+int test_let_exact_theta0(void) {
+    MPI_Comm comm = MPI_COMM_WORLD;
+    int rank;
+    MPI_Comm_rank(comm, &rank);
+    if (rank == 0)
+        printf("=== Test 14: LET con theta=0 vs Barnes-Hut secuencial (bit a bit) ===\n");
+
+    int N = 2000, capacity;
+    double theta = 0.0, softening = 0.01;
+
+    /* Referencia secuencial con el mismo theta=0: sin aproximaciones, el arbol
+       se recorre entero hasta las hojas. */
+    Particle *ref = malloc(N * sizeof(Particle));
+    init_plummer(ref, N, 42);
+    double mn[3], mx[3];
+    octree_bounds(ref, N, mn, mx);
+    morton_sort(ref, N, mn, mx);
+    Octree *rt = octree_build(ref, N);
+    octree_compute_mass(rt, ref);
+    compute_forces_bh(rt, ref, N, theta, softening);
+    octree_free(rt);
+
+    Particle *local = NULL;
+    Domain d;
+    MPI_Datatype ptype;
+    mpi_particle_type_init(&ptype);
+    domain_init(&d, comm);
+    int n_local = setup_distributed(&local, &capacity, &d, ptype, N, 42, comm);
+
+    int n_ghost = let_forces(&local, n_local, &capacity, &d, ptype,
+                             theta, softening, comm);
+
+    /* Con theta=0 no se acepta ningun resumen: cada proceso debe terminar
+       viendo las N particulas del sistema. */
+    int64_t nl = n_local, seen = n_local + n_ghost, min_seen;
+    MPI_Allreduce(&seen, &min_seen, 1, MPI_INT64_T, MPI_MIN, comm);
+    (void)nl;
+
+    Particle *all = malloc(N * sizeof(Particle));
+    int offset;
+    replicate_particles(local, n_local, all, N, &offset, ptype, comm);
+
+    int *pos_of_id = malloc(N * sizeof(int));
+    for (int i = 0; i < N; i++) pos_of_id[ref[i].id] = i;
+    double max_err = accel_error_by_id(all, ref, pos_of_id, N);
+
+    int pass = (max_err == 0.0) && (min_seen == N);
+    if (rank == 0) {
+        printf("  Particulas vistas por proceso (locales+fantasmas): %lld de %d\n",
+               (long long)min_seen, N);
+        printf("  Error relativo maximo: %.6e\n", max_err);
+        printf("  Resultado: %s\n\n", pass ? "PASS" : "FAIL");
+    }
+
+    free(pos_of_id); free(all); free(local); free(ref);
+    domain_free(&d);
+    mpi_particle_type_free(&ptype);
+    return pass;
+}
+
+int test_let_accuracy(void) {
+    MPI_Comm comm = MPI_COMM_WORLD;
+    int rank;
+    MPI_Comm_rank(comm, &rank);
+    if (rank == 0)
+        printf("=== Test 15: Precision del LET a theta=0.5 ===\n");
+
+    int N = 2000, capacity;
+    double theta = 0.5, softening = 0.01;
+
+    /* Dos referencias sobre el mismo estado: el metodo directo O(N^2), que es
+       la verdad, y el Barnes-Hut secuencial, que es el error que ya se acepta. */
+    Particle *exact = malloc(N * sizeof(Particle));
+    init_plummer(exact, N, 42);
+    double mn[3], mx[3];
+    octree_bounds(exact, N, mn, mx);
+    morton_sort(exact, N, mn, mx);
+
+    Particle *seq = malloc(N * sizeof(Particle));
+    memcpy(seq, exact, N * sizeof(Particle));
+
+    compute_forces_direct(exact, N, softening);
+    Octree *st = octree_build(seq, N);
+    octree_compute_mass(st, seq);
+    compute_forces_bh(st, seq, N, theta, softening);
+    octree_free(st);
+
+    Particle *local = NULL;
+    Domain d;
+    MPI_Datatype ptype;
+    mpi_particle_type_init(&ptype);
+    domain_init(&d, comm);
+    int n_local = setup_distributed(&local, &capacity, &d, ptype, N, 42, comm);
+    let_forces(&local, n_local, &capacity, &d, ptype, theta, softening, comm);
+
+    Particle *all = malloc(N * sizeof(Particle));
+    int offset;
+    replicate_particles(local, n_local, all, N, &offset, ptype, comm);
+
+    int *pos_of_id = malloc(N * sizeof(int));
+    for (int i = 0; i < N; i++) pos_of_id[exact[i].id] = i;
+
+    double err_let_vs_seq = accel_error_by_id(all, seq,   pos_of_id, N);
+    double err_let        = accel_error_by_id(all, exact, pos_of_id, N);
+
+    /* El Barnes-Hut secuencial contra el directo: la vara con la que se mide. */
+    double err_seq = 0.0;
+    for (int i = 0; i < N; i++) {
+        double diff[3];
+        VEC3_SUB(diff, seq[i].acc, exact[i].acc);
+        double den = VEC3_NORM(exact[i].acc);
+        if (den > 0.0) {
+            double e = VEC3_NORM(diff) / den;
+            if (e > err_seq) err_seq = e;
+        }
+    }
+
+    int pass = (err_let_vs_seq < 1e-3) && (err_let < 1.5 * err_seq);
+    if (rank == 0) {
+        printf("  LET vs Barnes-Hut secuencial: %.6e  (umbral 1e-3)\n", err_let_vs_seq);
+        printf("  Barnes-Hut secuencial vs directo O(N^2): %.6e\n", err_seq);
+        printf("  LET vs directo O(N^2):                   %.6e  (umbral %.6e)\n",
+               err_let, 1.5 * err_seq);
+        printf("  Resultado: %s\n\n", pass ? "PASS" : "FAIL");
+    }
+
+    free(pos_of_id); free(all); free(local); free(seq); free(exact);
+    domain_free(&d);
+    mpi_particle_type_free(&ptype);
+    return pass;
+}
+
+int test_let_volume(void) {
+    MPI_Comm comm = MPI_COMM_WORLD;
+    int rank, P;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &P);
+    if (rank == 0)
+        printf("=== Test 16: Volumen del LET (crecimiento de n_ghost con N) ===\n");
+
+    const int Ns[2] = {5000, 20000};   /* factor 4 entre ambos */
+    double ratio[2] = {0, 0};
+    int64_t ghosts[2] = {0, 0};
+
+    for (int c = 0; c < 2; c++) {
+        int N = Ns[c], capacity;
+        Particle *local = NULL;
+        Domain d;
+        MPI_Datatype ptype;
+        mpi_particle_type_init(&ptype);
+        domain_init(&d, comm);
+
+        int n_local = setup_distributed(&local, &capacity, &d, ptype, N, 42, comm);
+        int n_ghost = let_forces(&local, n_local, &capacity, &d, ptype, 0.5, 0.01, comm);
+
+        int64_t g = n_ghost, g_sum;
+        MPI_Allreduce(&g, &g_sum, 1, MPI_INT64_T, MPI_SUM, comm);
+        ghosts[c] = g_sum / P;
+        ratio[c]  = (double)ghosts[c] / ((double)N / P);
+
+        free(local);
+        domain_free(&d);
+        mpi_particle_type_free(&ptype);
+    }
+
+    /* Si n_ghost creciera sublinealmente, el ratio fantasmas/locales bajaria al
+       crecer N. Exponente estimado: log(g2/g1) / log(N2/N1). 1.0 = lineal. */
+    double growth = log((double)ghosts[1] / (double)ghosts[0]) / log(4.0);
+    int pass = (growth < 0.9);
+
+    if (rank == 0) {
+        printf("  N=%d:  fantasmas/proceso=%lld  ratio vs locales=%.2f\n",
+               Ns[0], (long long)ghosts[0], ratio[0]);
+        printf("  N=%d: fantasmas/proceso=%lld  ratio vs locales=%.2f\n",
+               Ns[1], (long long)ghosts[1], ratio[1]);
+        printf("  Exponente de crecimiento n_ghost ~ N^k:  k=%.2f  (umbral k<0.9)\n", growth);
+        printf("  Resultado: %s\n", pass ? "PASS" : "FAIL");
+        if (!pass) {
+            printf("  FALLA CONOCIDA Y DOCUMENTADA, no bajar el umbral: sobre Plummer los\n");
+            printf("  dominios de rangos Morton no son compactos, el AABB del destino cubre\n");
+            printf("  buena parte del dominio y la seleccion casi no resume. Ver\n");
+            printf("  docs/week4-report.md, seccion \"Por que el LET no comprime\".\n");
+        }
+        printf("\n");
+    }
+    return pass;
+}
+
+int test_balance_work(void) {
+    MPI_Comm comm = MPI_COMM_WORLD;
+    int rank, P;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &P);
+    if (rank == 0)
+        printf("=== Test 17: Rebalanceo por costo vs por conteo ===\n");
+
+    const int N = 20000, steps = 30;
+    double imb[2] = {0, 0}, imb_n[2] = {0, 0};
+
+    for (int mode = 0; mode < 2; mode++) {   /* 0 = conteo, 1 = costo */
+        int capacity;
+        Particle *local = NULL;
+        Domain d;
+        MPI_Datatype ptype;
+        mpi_particle_type_init(&ptype);
+        domain_init(&d, comm);
+
+        int n_local = setup_distributed(&local, &capacity, &d, ptype, N, 42, comm);
+        for (int s = 0; s < steps; s++)
+            n_local = distributed_step_let(&local, n_local, &capacity, &d, ptype, N,
+                                           0.001, 0.5, 0.01, mode,
+                                           (s % 5 == 0), comm);
+
+        /* Trabajo real del ultimo paso: determinista, a diferencia de los
+           tiempos, que dependen de la maquina y del ruido del sistema. */
+        int64_t w = 0;
+        for (int i = 0; i < n_local; i++) w += local[i].work;
+
+        int64_t w_max, w_sum, n_max, n_sum, nl = n_local;
+        MPI_Allreduce(&w, &w_max, 1, MPI_INT64_T, MPI_MAX, comm);
+        MPI_Allreduce(&w, &w_sum, 1, MPI_INT64_T, MPI_SUM, comm);
+        MPI_Allreduce(&nl, &n_max, 1, MPI_INT64_T, MPI_MAX, comm);
+        MPI_Allreduce(&nl, &n_sum, 1, MPI_INT64_T, MPI_SUM, comm);
+
+        imb[mode]   = (double)w_max / ((double)w_sum / P);
+        imb_n[mode] = (double)n_max / ((double)n_sum / P);
+
+        free(local);
+        domain_free(&d);
+        mpi_particle_type_free(&ptype);
+    }
+
+    int pass = (imb[1] < imb[0]) && (imb[1] < 1.05);
+    if (rank == 0) {
+        printf("  Reparto por conteo: desbalance trabajo=%.4f  particulas=%.4f\n",
+               imb[0], imb_n[0]);
+        printf("  Reparto por costo:  desbalance trabajo=%.4f  particulas=%.4f\n",
+               imb[1], imb_n[1]);
+        printf("  (que el desbalance de PARTICULAS empeore es la senal esperada:\n");
+        printf("   los procesos con zonas densas reciben menos particulas)\n");
+        printf("  Resultado: %s\n\n", pass ? "PASS" : "FAIL");
+    }
+    return pass;
+}
+
+int test_let_energy_conservation(void) {
+    MPI_Comm comm = MPI_COMM_WORLD;
+    int rank;
+    MPI_Comm_rank(comm, &rank);
+    if (rank == 0)
+        printf("=== Test 18: Conservacion de energia con LET (200 pasos) ===\n");
+
+    const int N = 5000, steps = 200;
+    const double dt = 0.001, theta = 0.5, soft = 0.01;
+    int capacity;
+    Particle *local = NULL;
+    Domain d;
+    MPI_Datatype ptype;
+    mpi_particle_type_init(&ptype);
+    domain_init(&d, comm);
+
+    int n_local = setup_distributed(&local, &capacity, &d, ptype, N, 42, comm);
+
+    /* Energia inicial sobre el arbol del LET. */
+    int n_ghost = let_forces(&local, n_local, &capacity, &d, ptype, theta, soft, comm);
+    Octree *t = octree_build_box(local, n_local + n_ghost, d.gmin, d.gmax);
+    octree_compute_mass(t, local);
+    double e[2] = { kinetic_energy_range(local, n_local, 0, n_local),
+                    potential_energy_bh_range(t, local, n_local + n_ghost,
+                                              0, n_local, theta, soft) };
+    octree_free(t);
+    double g[2];
+    MPI_Allreduce(e, g, 2, MPI_DOUBLE, MPI_SUM, comm);
+    double E0 = g[0] + g[1];
+
+    for (int s = 0; s < steps; s++)
+        n_local = distributed_step_let(&local, n_local, &capacity, &d, ptype, N,
+                                       dt, theta, soft, 1, (s % 20 == 0), comm);
+
+    n_ghost = let_forces(&local, n_local, &capacity, &d, ptype, theta, soft, comm);
+    t = octree_build_box(local, n_local + n_ghost, d.gmin, d.gmax);
+    octree_compute_mass(t, local);
+    e[0] = kinetic_energy_range(local, n_local, 0, n_local);
+    e[1] = potential_energy_bh_range(t, local, n_local + n_ghost,
+                                     0, n_local, theta, soft);
+    octree_free(t);
+    MPI_Allreduce(e, g, 2, MPI_DOUBLE, MPI_SUM, comm);
+    double Ef = g[0] + g[1];
+
+    double drift = fabs(Ef - E0) / fabs(E0);
+    int pass = (drift < 0.01);
+    if (rank == 0) {
+        printf("  E0 = %.10e   Ef = %.10e\n", E0, Ef);
+        printf("  Energy drift: %.6e  (umbral 1e-2)\n", drift);
+        printf("  Resultado: %s\n\n", pass ? "PASS" : "FAIL");
+    }
+
+    free(local);
+    domain_free(&d);
+    mpi_particle_type_free(&ptype);
+    return pass;
+}
+
 #endif /* USE_MPI */
 
 int run_all_tests(void) {
@@ -691,7 +1063,7 @@ int run_all_tests(void) {
     int rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-    int passed = 0, total = 13;
+    int passed = 0, total = 18;
 
     /* Los tests 1-9 son puramente locales: los corre y los imprime el rango 0.
        Los tests 10-13 son colectivos y los deben ejecutar TODOS los procesos,
@@ -715,11 +1087,19 @@ int run_all_tests(void) {
     collective += test_mpi_identity_checksum();
     collective += test_mpi_partition_validity();
     collective += test_mpi_forces_vs_sequential();
+    collective += test_let_exact_theta0();
+    collective += test_let_accuracy();
+    collective += test_let_volume();
+    collective += test_balance_work();
+    collective += test_let_energy_conservation();
 
     int rc = 0;
     if (rank == 0) {
         passed += collective;
-        printf("========== RESULTADO: %d/%d tests pasaron ==========\n\n", passed, total);
+        printf("========== RESULTADO: %d/%d tests pasaron ==========\n", passed, total);
+        if (passed == total - 1)
+            printf("(el test 16 falla a proposito: ver docs/week4-report.md)\n");
+        printf("\n");
         rc = (passed == total) ? 0 : 1;
     }
     MPI_Bcast(&rc, 1, MPI_INT, 0, MPI_COMM_WORLD);
@@ -739,7 +1119,7 @@ int run_all_tests(void) {
     passed += test_openmp_determinism();
 
     printf("========== RESULTADO: %d/%d tests pasaron ==========\n", passed, total);
-    printf("(los tests 10-13 requieren MPI: mpirun -np 4 ./nbody_mpi --validate)\n\n");
+    printf("(los tests 10-18 requieren MPI: mpirun -np 4 ./nbody_mpi --validate)\n\n");
     return (passed == total) ? 0 : 1;
 #endif
 }

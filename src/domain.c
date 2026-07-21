@@ -68,12 +68,47 @@ static int64_t count_below(const Particle *p, int n, uint64_t key) {
 
 void domain_partition(Domain *d, const Particle *p, int n_local,
                       int64_t n_global, MPI_Comm comm) {
+    domain_partition_ex(d, p, n_local, n_global, 0, comm);
+}
+
+void domain_partition_ex(Domain *d, const Particle *p, int n_local,
+                         int64_t n_global, int use_work, MPI_Comm comm) {
     const int P = d->nprocs;
     d->splitters[0] = 0;
     d->splitters[P] = UINT64_MAX;
     if (P == 1) return;
 
     const int ns = P - 1;   /* splitters interiores a determinar */
+
+    /*
+     * Prefijo de pesos: prefix[j] = trabajo acumulado de las j primeras
+     * partículas locales. Como el arreglo está ordenado por clave, el trabajo
+     * con clave < K es prefix[count_below(K)] — misma búsqueda binaria que el
+     * conteo, con una lectura extra. Sin pesos el prefijo es la identidad y se
+     * usa directamente el índice.
+     */
+    int64_t *prefix = NULL;
+    int64_t  total  = n_global;
+
+    if (use_work) {
+        prefix = malloc((size_t)(n_local + 1) * sizeof(int64_t));
+        prefix[0] = 0;
+        for (int i = 0; i < n_local; i++)
+            prefix[i + 1] = prefix[i] + p[i].work;
+
+        int64_t w_local = prefix[n_local], w_global;
+        MPI_Allreduce(&w_local, &w_global, 1, MPI_INT64_T, MPI_SUM, comm);
+
+        /* Primer paso: work todavía no fue medido. Caer al reparto por conteo
+           en vez de dividir por cero o dejar todos los splitters en 0. */
+        if (w_global <= 0) {
+            free(prefix);
+            prefix = NULL;
+            use_work = 0;
+        } else {
+            total = w_global;
+        }
+    }
 
     uint64_t *lo     = malloc(ns * sizeof(uint64_t));
     uint64_t *hi     = malloc(ns * sizeof(uint64_t));
@@ -89,7 +124,7 @@ void domain_partition(Domain *d, const Particle *p, int n_local,
     for (int k = 0; k < ns; k++) {
         lo[k] = 0;
         hi[k] = KEY_LIMIT;
-        target[k] = ((int64_t)(k + 1) * n_global) / P;
+        target[k] = ((int64_t)(k + 1) * total) / P;
     }
 
     /*
@@ -108,7 +143,8 @@ void domain_partition(Domain *d, const Particle *p, int n_local,
             } else {
                 mid[k] = lo[k];
             }
-            cl[k] = count_below(p, n_local, mid[k]);
+            int64_t j = count_below(p, n_local, mid[k]);
+            cl[k] = prefix ? prefix[j] : j;
         }
         if (!active) break;
 
@@ -125,6 +161,7 @@ void domain_partition(Domain *d, const Particle *p, int n_local,
         d->splitters[k + 1] = lo[k];
 
     free(lo); free(hi); free(mid); free(target); free(cl); free(cg);
+    free(prefix);
 }
 
 int domain_owner(const Domain *d, uint64_t key) {

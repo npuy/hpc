@@ -13,9 +13,22 @@
  * reordenamiento por Morton y a la migración entre procesos MPI, y es lo que
  * permite verificar que ninguna partícula se pierde ni se duplica (tests 11 y
  * 13). Los generadores lo asignan como el índice inicial 0..n-1.
+ *
+ * El campo work es el costo medido del recorrido Barnes-Hut de la partícula en
+ * el último paso (cantidad de interacciones evaluadas). Vive dentro del struct
+ * y no en un arreglo paralelo a propósito: así viaja solo en la migración, sin
+ * que haya que mantener sincronizada una segunda permutación. Es el peso que
+ * usa el rebalanceo dinámico (ver domain.h).
+ *
+ * Convención de la semana 4: una partícula con id == -1 es un FANTASMA, es
+ * decir un nodo remoto importado por el LET (ver let.h). Los fantasmas ejercen
+ * fuerza pero no la reciben, y quedan excluidos de checksums, energías y
+ * migración.
  */
 
 #include <stdint.h>
+
+#define PARTICLE_GHOST_ID ((int64_t)-1)
 
 typedef struct {
     double pos[3];    /* posición en espacio 3D (x, y, z) */
@@ -23,7 +36,8 @@ typedef struct {
     double acc[3];    /* aceleración gravitatoria acumulada (ax, ay, az) */
     double mass;      /* masa de la partícula (masa total del sistema = 1) */
     uint64_t morton;  /* clave Morton de 63 bits para ordenamiento Z-order */
-    int64_t  id;      /* identidad global estable, asignada en la inicialización */
+    int64_t  id;      /* identidad global estable; -1 marca un fantasma del LET */
+    int64_t  work;    /* interacciones del último paso: peso del rebalanceo */
 } Particle;
 
 /*
